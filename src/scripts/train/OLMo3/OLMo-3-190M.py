@@ -186,4 +186,8 @@ if __name__ == "__main__":
             --launch.num_nodes=2 \
             --launch.priority=high
     """
+    import torch
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
     main(config_builder=build_experiment_config)
