@@ -19,7 +19,7 @@ from olmo_core.internal.common import (
 )
 from olmo_core.internal.cookbook import configure_required_callbacks
 from olmo_core.internal.experiment import CliContext, ExperimentConfig, main
-from olmo_core.launch.beaker import BeakerLaunchConfig
+from olmo_core.launch.beaker import BeakerLaunchConfig, BeakerEnvVar
 from olmo_core.nn.attention import AttentionBackendName
 from olmo_core.nn.transformer import (
     TransformerConfig,
@@ -37,6 +37,7 @@ SEQ_LENGTH = 8192
 GLOBAL_BATCH_SIZE = 2**19  # ~524k tokens
 CHINCHILLA_MULTIPLE = 1.0  # Train to 1x Chinchilla optimality
 FOR_BENCHMARKING = False
+USE_DETERMINISTIC_TRAINING = False
 
 
 def estimate_lr(model_params: int, chinchilla_multiple: float = 1.0) -> float:
@@ -158,6 +159,12 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             tokenizer_config, SEQ_LENGTH, cli_context.cluster, task_set="fast"
         )
 
+    if USE_DETERMINISTIC_TRAINING:
+        beaker_launch_config.env_vars.append(
+            BeakerEnvVar(name="CUBLAS_WORKSPACE_CONFIG", value=":4096:8")
+        )
+        trainer_config.deterministic_training = True
+
     experiment_config = ExperimentConfig(
         run_name=cli_context.run_name,
         launch=beaker_launch_config,
@@ -171,7 +178,8 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     experiment_config = experiment_config.merge(cli_context.overrides)
     return experiment_config
 
-
+# 1. train on one GPU
+# 2. FSDP vs DP
 if __name__ == "__main__":
     """
     Invoke this script directly to access the internal experiment CLI, which
@@ -186,8 +194,4 @@ if __name__ == "__main__":
             --launch.num_nodes=2 \
             --launch.priority=high
     """
-    import torch
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
     main(config_builder=build_experiment_config)

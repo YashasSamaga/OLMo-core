@@ -53,6 +53,8 @@ class TrainerConfig(Config):
     no_evals: bool = False
     steps_to_skip: Optional[List[StepSkipRange]] = None
 
+    deterministic_training: bool = False
+
     def add_callback(self, name: str, callback: Callback):
         """
         Add another callback.
@@ -187,6 +189,11 @@ class TrainerConfig(Config):
         callback_configs = {
             k: cb for k, cb in all_callbacks.items() if isinstance(cb, CallbackConfig)
         }
+
+        if self.deterministic_training:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            torch.use_deterministic_algorithms(True)
 
         trainer = Trainer(
             train_module=train_module,
