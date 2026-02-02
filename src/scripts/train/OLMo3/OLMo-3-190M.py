@@ -25,7 +25,7 @@ from olmo_core.nn.transformer import (
     TransformerConfig,
     TransformerDataParallelWrappingStrategy,
 )
-from olmo_core.optim import CosWithWarmup, OptimGroupOverride, SkipStepAdamWConfig
+from olmo_core.optim import CosWithWarmup, OptimGroupOverride, SkipStepAdamWConfig, ExponentialScheduler
 from olmo_core.train import Duration, TrainerConfig
 from olmo_core.train.callbacks import CheckpointerCallback, WandBCallback
 from olmo_core.train.train_module import (
@@ -100,6 +100,10 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
         max_grad_norm=1.0,
         scheduler=CosWithWarmup(warmup_steps=2000),
     )
+
+    if True:
+        train_module_config.scheduler = ExponentialScheduler()
+        train_module_config.optim.lr = 10
 
     intra_document_masking = False
     dataset_config = NumpyFSLDatasetConfig.from_data_mix(
