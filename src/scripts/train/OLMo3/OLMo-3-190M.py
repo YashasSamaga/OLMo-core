@@ -162,6 +162,9 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             tokenizer_config, SEQ_LENGTH, cli_context.cluster, task_set="fast"
         )
 
+    if 'gap_monitor' in trainer_config.callbacks:
+        setattr(trainer_config.callbacks['gap_monitor'], "enabled", True)
+
     experiment_config = ExperimentConfig(
         run_name=cli_context.run_name,
         launch=beaker_launch_config,
