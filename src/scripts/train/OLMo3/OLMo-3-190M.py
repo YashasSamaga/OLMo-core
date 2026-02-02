@@ -163,7 +163,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
         )
 
     if 'gap_monitor' in trainer_config.callbacks:
-        setattr(trainer_config.callbacks['gap_monitor'], "enabled", True)
+        setattr(trainer_config.callbacks['gap_monitor'], "enabled", False)
 
     experiment_config = ExperimentConfig(
         run_name=cli_context.run_name,
