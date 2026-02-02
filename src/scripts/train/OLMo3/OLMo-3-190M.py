@@ -101,7 +101,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
         scheduler=CosWithWarmup(warmup_steps=2000),
     )
 
-    if True:
+    if False:
         train_module_config.scheduler = ExponentialScheduler()
         train_module_config.optim.lr = 10
 
