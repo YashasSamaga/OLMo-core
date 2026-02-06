@@ -77,7 +77,7 @@ class GemmaLikeTransformerConfig(TransformerConfig):
             ),
             attn_backend=kwargs.pop(
                 "attn_backend",
-                AttentionBackendName.flash_3,
+                AttentionBackendName.flash_2,
             ),
             **kwargs,
         )
