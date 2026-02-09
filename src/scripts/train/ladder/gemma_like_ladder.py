@@ -100,6 +100,20 @@ class GemmaLikeTransformerConfig(TransformerConfig):
         )
 
     @classmethod
+    def v1_5L(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        """
+        A 5-layer model config (d_model=640, hidden_size=640).
+        """
+        return cls.v1(
+            d_model=640,
+            hidden_size=640,
+            n_layers=5,
+            n_heads=6,
+            vocab_size=vocab_size,
+            **kwargs,
+        )
+
+    @classmethod
     def v1_680M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         """
         A 680M model config.
@@ -230,6 +244,7 @@ class _ModelSizeSettings:
 
 
 class GemmaLikeOlmoV1(StrEnum):
+    GL_5L = "5L"
     GL_250M = "250M"
     GL_680M = "680M"
     GL_1p2B = "1.2B"
@@ -243,6 +258,7 @@ class GemmaLikeOlmoV1(StrEnum):
         """Get the model config and all settings for this model size."""
         # Mapping: (size, num_nodes, round_nearest, activation_memory_budget)
         settings_map = {
+            GemmaLikeOlmoV1.GL_5L: _ModelSizeSettings("5L", 1, 16, 1.0),
             GemmaLikeOlmoV1.GL_250M: _ModelSizeSettings("250M", 1, 16, 1.0),
             GemmaLikeOlmoV1.GL_680M: _ModelSizeSettings("680M", 2, 16, 1.0),
             GemmaLikeOlmoV1.GL_1p2B: _ModelSizeSettings("1p2B", 2, 16, 1.0),
