@@ -242,22 +242,9 @@ class OptimizationDiagnosticsCallback(Callback):
                 return
 
             res_grad_norm = grad_residual.norm(dim=-1).mean()
-            upd_grad_norm = grad_update.norm(dim=-1).mean()
-            grad_ratio = (
-                grad_update.norm(dim=-1) / (grad_residual.norm(dim=-1) + self.eps)
-            ).mean()
-
             self._log_metric(
                 f"residual_update/grads/{name}/residual_norm",
                 res_grad_norm,
-            )
-            self._log_metric(
-                f"residual_update/grads/{name}/update_norm",
-                upd_grad_norm,
-            )
-            self._log_metric(
-                f"residual_update/grads/{name}/update_residual_ratio",
-                grad_ratio,
             )
 
         return hook
