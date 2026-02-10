@@ -37,6 +37,7 @@ from olmo_core.train.callbacks import (
     CometCallback,
     DownstreamEvaluatorCallbackConfig,
     LMEvaluatorCallbackConfig,
+    OptimizationDiagnosticsCallback,
     SpeedMonitorCallback,
     StabilityMonitorCallback,
     WandBCallback,
@@ -560,6 +561,30 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
         )
         .with_callback("speed_monitor", SpeedMonitorCallback())
         .with_callback("stability_monitor", StabilityMonitorCallback(enabled=True))
+        .with_callback(
+            "optimization_diagnostics",
+            OptimizationDiagnosticsCallback(
+                enabled=False,
+                log_interval=None,
+                eps=1e-8,
+                track_residual_updates=False,
+                eps_hit_tolerance=0.1,
+                track_layer_norm_eps=False,
+                track_param_grad_rmse=False,
+                track_param_grad_meanvar=False,
+                track_param_meanvar=False,
+                track_update_param_ratio=False,
+                track_activation_rmse=False,
+                track_activation_meanvar=False,
+                track_activation_norm=False,
+                track_activation_grad_rmse=False,
+                track_activation_grad_meanvar=False,
+                track_activation_grad_norm=False,
+                track_update_rmse=False,
+                track_optimizer_state_rmse_meanvar=False,
+                namespace="optim_diagnostics",
+            ),
+        )
         .with_callback(
             "comet",
             CometCallback(

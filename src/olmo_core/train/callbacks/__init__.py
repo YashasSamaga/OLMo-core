@@ -20,6 +20,7 @@ from .gpu_memory_monitor import GPUMemoryMonitorCallback
 from .list_checkpointer import ListCheckpointerCallback
 from .metric_saver import MetricSaverCallback
 from .monkey_patcher import MonkeyPatcherCallback
+from .optimization_tracker import OptimizationDiagnosticsCallback
 from .profiler import ProfilerCallback
 from .sequence_length_scheduler import SequenceLengthSchedulerCallback
 from .slack_notifier import SlackNotificationSetting, SlackNotifierCallback
@@ -54,6 +55,7 @@ __all__ = [
     "MonkeyPatcherCallback",
     "MetricSaverCallback",
     "ListCheckpointerCallback",
+    "OptimizationDiagnosticsCallback",
 ]
 
 __doc__ += "\n"
