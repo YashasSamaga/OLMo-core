@@ -141,7 +141,7 @@ class OptimizationDiagnosticsCallback(Callback):
 
         if self.track_update_param_ratio:
             self._prev_params = {
-                name: p.detach().float().clone()
+                name: get_local_tensor(p.detach()).float().clone()
                 for name, p in model.named_parameters()
                 if p.requires_grad
             }
