@@ -87,7 +87,7 @@ class InitMethod(StrEnum):
             _apply_init(nn.init.normal_, m.weight, generator=generator, std=d_model**-0.5)
         elif self == InitMethod.claude:
             # Claude init uses std = 1.0 for embeddings with normal distribution
-            _apply_init(nn.init.normal_, m.weight, generator=generator, std=1.0)
+            _apply_init(nn.init.normal_, m.weight, generator=generator, std=std)
         else:
             _apply_init(
                 nn.init.trunc_normal_,
