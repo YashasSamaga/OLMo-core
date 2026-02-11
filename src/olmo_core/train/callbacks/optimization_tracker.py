@@ -40,22 +40,22 @@ class OptimizationDiagnosticsCallback(Callback):
     track_layer_norm_eps: bool = False  # Log eps-hit indicators for LayerNorm/RMSNorm.
 
     track_param_grad_rmse: bool = False  # Log per-parameter grad RMSE.
-    track_param_grad_meanvar: bool = False  # Log per-parameter grad mean/variance.
+    track_param_grad_meanvar: bool = False  # Log per-parameter grad mean/stddev.
 
-    track_param_meanvar: bool = False  # Log per-parameter mean and variance.
+    track_param_meanvar: bool = False  # Log per-parameter mean and stddev.
     track_update_param_ratio: bool = False  # Log per-parameter update/param ratio.
 
     track_activation_rmse: bool = False  # Log activation RMSE over all modules.
-    track_activation_meanvar: bool = False  # Log activation mean/variance over all modules.
+    track_activation_meanvar: bool = False  # Log activation mean/stddev over all modules.
     track_activation_norm: bool = False  # Log mean activation norm over batch/tokens for all modules.
 
     track_activation_grad_rmse: bool = False  # Log activation grad RMSE over all modules.
-    track_activation_grad_meanvar: bool = False  # Log activation grad mean/variance over all modules.
+    track_activation_grad_meanvar: bool = False  # Log activation grad mean/stddev over all modules.
     track_activation_grad_norm: bool = False  # Log mean activation grad norm over batch/tokens for all modules.
 
     track_update_rmse: bool = False  # Log per-parameter update RMSE.
 
-    track_optimizer_state_rmse_meanvar: bool = False  # Log optimizer state RMSE/mean/variance.
+    track_optimizer_state_rmse_meanvar: bool = False  # Log optimizer state RMSE/mean/stddev.
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
     _handles: List[torch.utils.hooks.RemovableHandle] = field(default_factory=list, repr=False)
@@ -135,9 +135,9 @@ class OptimizationDiagnosticsCallback(Callback):
                     grad_rmse = self._rmse(grad)
                     self._log_metric(f"grads/{name}/rmse", grad_rmse)
                 if self.track_param_grad_meanvar:
-                    grad_mean, grad_var = self._meanvar(grad)
+                    grad_mean, grad_std = self._meanstd(grad)
                     self._log_metric(f"grads/{name}/mean", grad_mean)
-                    self._log_metric(f"grads/{name}/var", grad_var)
+                    self._log_metric(f"grads/{name}/stddev", grad_std)
 
         if self.track_update_param_ratio:
             self._prev_params = {
@@ -173,11 +173,11 @@ class OptimizationDiagnosticsCallback(Callback):
         """Compute RMSE over all elements in the tensor."""
         return tensor.pow(2).mean().sqrt()
 
-    def _meanvar(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute mean/variance over all elements in the tensor."""
+    def _meanstd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute mean/stddev over all elements in the tensor."""
         mean = tensor.mean()
-        var = tensor.var(unbiased=False)
-        return mean, var
+        std = tensor.var(unbiased=False).sqrt()
+        return mean, std
 
     def _mean_norm_over_batch_tokens(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compute mean L2 norm over batch/tokens (all dims except the last)."""
@@ -187,11 +187,11 @@ class OptimizationDiagnosticsCallback(Callback):
         """Compute RMSE per vector (last dim), then average over batch/tokens."""
         return tensor.pow(2).mean(dim=-1).sqrt().mean()
 
-    def _vector_meanvar(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute mean/variance per vector (last dim), then average over batch/tokens."""
+    def _vector_meanstd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute mean/stddev per vector (last dim), then average over batch/tokens."""
         mean = tensor.mean(dim=-1).mean()
-        var = tensor.var(dim=-1, unbiased=False).mean()
-        return mean, var
+        std = tensor.var(dim=-1, unbiased=False).sqrt().mean()
+        return mean, std
 
     def _make_residual_stream_forward_hook(self, name: str):
         def hook(module: nn.Module, inputs: Tuple[torch.Tensor, torch.Tensor], output: torch.Tensor):
@@ -267,9 +267,9 @@ class OptimizationDiagnosticsCallback(Callback):
                     act_rmse = self._vector_rmse(act)
                     self._log_metric(f"activations/{name}/rmse", act_rmse)
                 if self.track_activation_meanvar:
-                    act_mean, act_var = self._vector_meanvar(act)
+                    act_mean, act_std = self._vector_meanstd(act)
                     self._log_metric(f"activations/{name}/mean", act_mean)
-                    self._log_metric(f"activations/{name}/var", act_var)
+                    self._log_metric(f"activations/{name}/stddev", act_std)
                 if self.track_activation_norm:
                     act_norm = self._mean_norm_over_batch_tokens(act)
                     self._log_metric(f"activations/{name}/norm", act_norm)
@@ -298,9 +298,9 @@ class OptimizationDiagnosticsCallback(Callback):
                     act_grad_rmse = self._vector_rmse(act_grad)
                     self._log_metric(f"activation_grads/{name}/rmse", act_grad_rmse)
                 if self.track_activation_grad_meanvar:
-                    act_grad_mean, act_grad_var = self._vector_meanvar(act_grad)
+                    act_grad_mean, act_grad_std = self._vector_meanstd(act_grad)
                     self._log_metric(f"activation_grads/{name}/mean", act_grad_mean)
-                    self._log_metric(f"activation_grads/{name}/var", act_grad_var)
+                    self._log_metric(f"activation_grads/{name}/stddev", act_grad_std)
                 if self.track_activation_grad_norm:
                     act_grad_norm = self._mean_norm_over_batch_tokens(act_grad)
                     self._log_metric(f"activation_grads/{name}/norm", act_grad_norm)
@@ -391,8 +391,8 @@ class OptimizationDiagnosticsCallback(Callback):
                     continue
                 mean = get_local_tensor(p.detach()).float().mean()
                 self._log_metric(f"params/{name}/mean", mean)
-                var = get_local_tensor(p.detach()).float().var(unbiased=False)
-                self._log_metric(f"params/{name}/var", var)
+                std = get_local_tensor(p.detach()).float().var(unbiased=False).sqrt()
+                self._log_metric(f"params/{name}/stddev", std)
 
         if self.track_optimizer_state_rmse_meanvar and optim is not None:
             for param, state in optim.state.items():
@@ -407,16 +407,16 @@ class OptimizationDiagnosticsCallback(Callback):
                 if exp_avg is not None:
                     exp_avg_t = get_local_tensor(exp_avg.detach()).float()
                     rmse = self._rmse(exp_avg_t)
-                    mean, var = self._meanvar(exp_avg_t)
+                    mean, std = self._meanstd(exp_avg_t)
                     self._log_metric(f"optimizer_state/{name}/exp_avg_rmse", rmse)
                     self._log_metric(f"optimizer_state/{name}/exp_avg_mean", mean)
-                    self._log_metric(f"optimizer_state/{name}/exp_avg_var", var)
+                    self._log_metric(f"optimizer_state/{name}/exp_avg_stddev", std)
                 if exp_avg_sq is not None:
                     exp_avg_sq_t = get_local_tensor(exp_avg_sq.detach()).float()
                     rmse = self._rmse(exp_avg_sq_t)
-                    mean, var = self._meanvar(exp_avg_sq_t)
+                    mean, std = self._meanstd(exp_avg_sq_t)
                     self._log_metric(f"optimizer_state/{name}/exp_avg_sq_rmse", rmse)
                     self._log_metric(f"optimizer_state/{name}/exp_avg_sq_mean", mean)
-                    self._log_metric(f"optimizer_state/{name}/exp_avg_sq_var", var)
+                    self._log_metric(f"optimizer_state/{name}/exp_avg_sq_stddev", std)
 
         self._prev_params = None
