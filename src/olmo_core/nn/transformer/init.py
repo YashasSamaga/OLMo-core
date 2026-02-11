@@ -141,6 +141,11 @@ class InitMethod(StrEnum):
                 for w in (m.w_q, m.w_k, m.w_v):
                     w_std = w.in_features**-0.5
                     self._init_linear(w, std=w_std, generator=generator)
+                        # Initialize w_g if present (gated attention)
+                if hasattr(m, "w_g") and m.w_g is not None:
+                    if self == InitMethod.fan_in:
+                        std = m.w_g.in_features**-0.5
+                    self._init_linear(m.w_g, std=std, generator=generator)
             else:
                 if self == InitMethod.normalized:
                     std = d_model**-0.5
