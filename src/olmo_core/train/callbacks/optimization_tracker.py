@@ -56,6 +56,8 @@ class OptimizationDiagnosticsCallback(Callback):
     track_update_rmse: bool = False  # Log per-parameter update RMSE.
 
     track_optimizer_state_rmse_meanvar: bool = False  # Log optimizer state RMSE/mean/stddev.
+
+    track_lm_head: bool = False  # Log LM head metrics (top-1 mass, max/avg/min logits).
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
     _handles: List[torch.utils.hooks.RemovableHandle] = field(default_factory=list, repr=False)
@@ -106,6 +108,13 @@ class OptimizationDiagnosticsCallback(Callback):
                     self._handles.append(
                         module.register_forward_hook(self._make_layer_norm_hook(name))
                     )
+
+        if self.track_lm_head:
+            lm_head = getattr(model, "lm_head", None)
+            if lm_head is not None and isinstance(lm_head, nn.Module):
+                self._handles.append(
+                    lm_head.register_forward_hook(self._make_lm_head_hook())
+                )
 
     def post_train(self):
         for handle in self._handles:
@@ -420,3 +429,46 @@ class OptimizationDiagnosticsCallback(Callback):
                     self._log_metric(f"optimizer_state/{name}/exp_avg_sq_stddev", std)
 
         self._prev_params = None
+    def _make_lm_head_hook(self):
+        """Hook to track LM head logits statistics and probability mass during training."""
+        def hook(module: nn.Module, inputs: Tuple[torch.Tensor, ...], output):
+            del module, inputs
+            if not self._should_log():
+                return
+
+            # Only track during training (when output is LMOutputWithLoss with a loss field).
+            # During inference, output is raw logits tensor.
+            if not hasattr(output, "loss"):
+                return
+
+            logits = None
+            if hasattr(output, "logits"):
+                logits = output.logits
+            else:
+                return
+
+            if logits is None or not isinstance(logits, torch.Tensor):
+                return
+
+            # Use full logits tensor (don't shard) for correct softmax and statistics
+            logits_tensor = logits.detach().float()
+            logits_flat = logits_tensor.view(-1, logits_tensor.shape[-1])
+            probs = torch.softmax(logits_flat, dim=-1)
+
+            top1_mass = probs.max(dim=-1)[0].mean()
+            self._log_metric("lm_head/top1_mass", top1_mass)
+
+            entropy = -(probs * torch.log(probs + self.eps)).sum(dim=-1).mean()
+            self._log_metric("lm_head/entropy", entropy)
+
+            max_logit = logits_flat.max(dim=-1)[0].mean()
+            min_logit = logits_flat.min(dim=-1)[0].mean()
+            avg_logit = logits_flat.mean(dim=-1).mean()
+            logit_std = logits_flat.std()
+
+            self._log_metric("lm_head/logit_max", max_logit)
+            self._log_metric("lm_head/logit_min", min_logit)
+            self._log_metric("lm_head/logit_avg", avg_logit)
+            self._log_metric("lm_head/logit_std", logit_std)
+
+        return hook

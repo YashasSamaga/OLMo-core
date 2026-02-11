@@ -582,6 +582,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
                 track_activation_grad_norm=False,
                 track_update_rmse=False,
                 track_optimizer_state_rmse_meanvar=False,
+                track_lm_head=False,
                 namespace="optim_diagnostics",
             ),
         )
