@@ -645,7 +645,21 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     )
 
     # Merge remaining overrides (multipliers have been removed)
-    return experiment_config.merge(overrides)
+    merged_config = experiment_config.merge(overrides)
+    
+    # Apply residual alpha uniformly to all blocks including block_overrides
+    # This handles the CLI override limitation where nested dict keys can't be created
+    if hasattr(merged_config.model.block, 'attention_residual_alpha'):
+        alpha_attn = merged_config.model.block.attention_residual_alpha
+        alpha_ff = merged_config.model.block.feed_forward_residual_alpha
+        if merged_config.model.block_overrides:
+            for block_config in merged_config.model.block_overrides.values():
+                if block_config.attention_residual_alpha is None:
+                    block_config.attention_residual_alpha = alpha_attn
+                if block_config.feed_forward_residual_alpha is None:
+                    block_config.feed_forward_residual_alpha = alpha_ff
+    
+    return merged_config
 
 
 if __name__ == "__main__":
