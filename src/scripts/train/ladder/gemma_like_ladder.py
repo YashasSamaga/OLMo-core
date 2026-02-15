@@ -7,7 +7,7 @@ This uses the `gemma3_like()` function from `TransformerConfig`, but puts in som
 import argparse
 import math
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 from olmo_core.config import DType, StrEnum
 from olmo_core.data import (
@@ -658,6 +658,10 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
                     block_config.attention_residual_alpha = alpha_attn
                 if block_config.feed_forward_residual_alpha is None:
                     block_config.feed_forward_residual_alpha = alpha_ff
+    
+    # Set the merged config on the wandb callback
+    if 'wandb' in merged_config.trainer.callbacks:
+        cast(WandBCallback, merged_config.trainer.callbacks['wandb']).config = merged_config.as_dict()
     
     return merged_config
 
