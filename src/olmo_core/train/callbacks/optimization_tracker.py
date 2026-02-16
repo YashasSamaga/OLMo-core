@@ -60,7 +60,7 @@ class OptimizationDiagnosticsCallback(Callback):
     track_lm_head: bool = False  # Log LM head metrics (top-1 mass, max/avg/min logits).
 
     track_param_movement: bool = False  # Log fraction of parameters moving beyond threshold.
-    param_movement_threshold: float = 0.001  # Threshold for "significant" parameter movement (0.1% by default).
+    param_movement_threshold: float = 0.01  # Threshold for "significant" parameter movement (0.1% by default).
     
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
@@ -405,7 +405,10 @@ class OptimizationDiagnosticsCallback(Callback):
                     moving_count = (rel_change > self.param_movement_threshold).float().sum()
                     total_count = torch.tensor(float(rel_change.numel()), device=rel_change.device)
                     moving_frac = moving_count / total_count
-                    self._log_metric(f"params/{name}/moving_fraction", moving_frac)
+                    self._log_metric(
+                        f"params/{name}/moving_fraction_gt_rel_{self.param_movement_threshold}",
+                        moving_frac,
+                    )
                 
         if self.track_param_meanvar:
             for name, p in model.named_parameters():
