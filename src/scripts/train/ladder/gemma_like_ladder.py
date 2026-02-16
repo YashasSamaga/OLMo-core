@@ -583,6 +583,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
                 track_update_rmse=False,
                 track_optimizer_state_rmse_meanvar=False,
                 track_lm_head=False,
+                track_param_movement=False,
                 namespace="optim_diagnostics",
             ),
         )

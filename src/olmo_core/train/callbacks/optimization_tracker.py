@@ -58,6 +58,10 @@ class OptimizationDiagnosticsCallback(Callback):
     track_optimizer_state_rmse_meanvar: bool = False  # Log optimizer state RMSE/mean/stddev.
 
     track_lm_head: bool = False  # Log LM head metrics (top-1 mass, max/avg/min logits).
+
+    track_param_movement: bool = False  # Log fraction of parameters moving beyond threshold.
+    param_movement_threshold: float = 0.001  # Threshold for "significant" parameter movement (0.1% by default).
+    
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
     _handles: List[torch.utils.hooks.RemovableHandle] = field(default_factory=list, repr=False)
@@ -148,7 +152,7 @@ class OptimizationDiagnosticsCallback(Callback):
                     self._log_metric(f"grads/{name}/mean", grad_mean)
                     self._log_metric(f"grads/{name}/stddev", grad_std)
 
-        if self.track_update_param_ratio:
+        if self.track_update_param_ratio or self.track_param_movement:
             self._prev_params = {
                 name: get_local_tensor(p.detach()).float().clone()
                 for name, p in model.named_parameters()
@@ -363,6 +367,7 @@ class OptimizationDiagnosticsCallback(Callback):
         if (
             self.track_update_param_ratio
             or self.track_update_rmse
+            or self.track_param_movement
         ) and self._prev_params is not None:
             step_factor = 1.0
             if optim is not None and hasattr(optim, "step_skipped"):
@@ -392,8 +397,16 @@ class OptimizationDiagnosticsCallback(Callback):
                 if self.track_update_rmse:
                     update_rmse = self._rmse(update)
                     self._log_metric(f"params/{name}/update_rmse", update_rmse)
-
-
+                
+                if self.track_param_movement:
+                    # Count parameters that moved more than threshold relative to their magnitude
+                    param_abs = prev.abs()
+                    rel_change = update.abs() / (param_abs + self.eps)
+                    moving_count = (rel_change > self.param_movement_threshold).float().sum()
+                    total_count = torch.tensor(float(rel_change.numel()), device=rel_change.device)
+                    moving_frac = moving_count / total_count
+                    self._log_metric(f"params/{name}/moving_fraction", moving_frac)
+                
         if self.track_param_meanvar:
             for name, p in model.named_parameters():
                 if not p.requires_grad:
