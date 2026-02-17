@@ -62,11 +62,15 @@ class OptimizationDiagnosticsCallback(Callback):
     track_param_movement: bool = False  # Log fraction of parameters moving beyond threshold.
     param_movement_threshold: float = 0.01  # Threshold for "significant" parameter movement (0.1% by default).
     
+    track_embedding_usage: bool = False  # Log embedding usage statistics (num activated, avg grad, activation counts).
+    
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
     _handles: List[torch.utils.hooks.RemovableHandle] = field(default_factory=list, repr=False)
     _prev_params: Optional[Dict[str, torch.Tensor]] = field(default=None, repr=False)
     _param_name_map: Optional[Dict[int, str]] = field(default=None, repr=False)
+
+    _embedding_token_ids: List[torch.Tensor] = field(default_factory=list, repr=False)  # Token IDs seen in forward pass
 
     def post_attach(self):
         if not self.enabled:
@@ -120,11 +124,19 @@ class OptimizationDiagnosticsCallback(Callback):
                     lm_head.register_forward_hook(self._make_lm_head_hook())
                 )
 
+        if self.track_embedding_usage:
+            embeddings = getattr(model, "embeddings", None)
+            if embeddings is not None and isinstance(embeddings, nn.Embedding):
+                self._handles.append(
+                    embeddings.register_forward_hook(self._make_embedding_forward_hook())
+                )
+
     def post_train(self):
         for handle in self._handles:
             handle.remove()
         self._handles.clear()
         self._prev_params = None
+        self._embedding_token_ids.clear()
 
     def pre_step(self, batch):
         del batch
@@ -205,6 +217,37 @@ class OptimizationDiagnosticsCallback(Callback):
         mean = tensor.mean(dim=-1).mean()
         std = tensor.var(dim=-1, unbiased=False).sqrt().mean()
         return mean, std
+
+    def _log_embedding_metrics(self):
+        if not self._embedding_token_ids:
+            return
+
+        # Collect all token IDs from all forward passes in this step
+        all_token_ids = []
+        for batch_token_ids in self._embedding_token_ids:
+            all_token_ids.extend(batch_token_ids.view(-1).tolist())
+
+        if not all_token_ids:
+            return
+
+        # Count activations per token
+        activation_counts = {}
+        for token_id in all_token_ids:
+            token_id_int = int(token_id)
+            if token_id_int not in activation_counts:
+                activation_counts[token_id_int] = 0
+            activation_counts[token_id_int] += 1
+
+        # Number of embeddings activated (unique token IDs used)
+        num_activated = len(activation_counts)
+        self._log_metric("embeddings/num_activated", torch.tensor(float(num_activated)))
+
+        # Median count of activations per embedding token
+        counts = list(activation_counts.values())
+        if counts:
+            counts_tensor = torch.tensor(counts, dtype=torch.float32)
+            median_count = torch.median(counts_tensor)
+            self._log_metric("embeddings/median_activation_count", median_count)
 
     def _make_residual_stream_forward_hook(self, name: str):
         def hook(module: nn.Module, inputs: Tuple[torch.Tensor, torch.Tensor], output: torch.Tensor):
@@ -444,7 +487,12 @@ class OptimizationDiagnosticsCallback(Callback):
                     self._log_metric(f"optimizer_state/{name}/exp_avg_sq_mean", mean)
                     self._log_metric(f"optimizer_state/{name}/exp_avg_sq_stddev", std)
 
+        if self.track_embedding_usage:
+            self._log_embedding_metrics()
+
         self._prev_params = None
+        self._embedding_token_ids.clear()
+
     def _make_lm_head_hook(self):
         """Hook to track LM head logits statistics and probability mass during training."""
         def hook(module: nn.Module, inputs: Tuple[torch.Tensor, ...], output):
@@ -486,5 +534,22 @@ class OptimizationDiagnosticsCallback(Callback):
             self._log_metric("lm_head/logit_min", min_logit)
             self._log_metric("lm_head/logit_avg", avg_logit)
             self._log_metric("lm_head/logit_std", logit_std)
+
+        return hook
+
+    def _make_embedding_forward_hook(self):
+        """Hook to track embedding usage (which token IDs are used in forward pass)."""
+        def hook(module: nn.Module, inputs: Tuple[torch.Tensor, ...], output: torch.Tensor):
+            del module, output
+            if not self._should_log():
+                return
+
+            # The input to nn.Embedding is the token IDs tensor
+            if not inputs or not isinstance(inputs[0], torch.Tensor):
+                return
+
+            token_ids = inputs[0]
+            # Store token IDs for this batch
+            self._embedding_token_ids.append(token_ids.detach().cpu())
 
         return hook
