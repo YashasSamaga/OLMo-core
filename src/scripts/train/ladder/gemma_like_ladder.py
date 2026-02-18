@@ -26,7 +26,7 @@ from olmo_core.internal.experiment import CliContext, ExperimentConfig, main
 from olmo_core.launch.beaker import BeakerLaunchConfig
 from olmo_core.nn.transformer import TransformerActivationCheckpointingMode
 from olmo_core.optim import (
-    CosWithWarmup,
+    CosWithWarmupAndLinearDecay,
     OptimGroupOverride,
     SchedulerUnits,
     SkipStepAdamWConfig,
@@ -521,7 +521,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
                 OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0))
             ],
         ),
-        scheduler=CosWithWarmup(
+        scheduler=CosWithWarmupAndLinearDecay(
             units=SchedulerUnits.tokens,
             warmup=2000 * global_batch_size,
         ),
