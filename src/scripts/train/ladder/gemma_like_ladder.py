@@ -572,6 +572,8 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
                 track_layer_norm_eps=False,
                 track_param_grad_rmse=False,
                 track_param_grad_meanvar=False,
+                track_gradient_outliers=False,
+                gradient_outlier_k=6.0,
                 track_param_meanvar=False,
                 track_update_param_ratio=False,
                 track_activation_rmse=False,

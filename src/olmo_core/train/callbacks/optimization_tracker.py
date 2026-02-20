@@ -64,6 +64,9 @@ class OptimizationDiagnosticsCallback(Callback):
     
     track_embedding_usage: bool = False  # Log embedding usage statistics (num activated, avg grad, activation counts).
     
+    track_gradient_outliers: bool = False  # Log when gradients exceed mu ± k*sigma (uses AdamW exp_avg/exp_avg_sq)
+    gradient_outlier_k: float = 6.0  # Number of standard deviations for outlier detection
+    
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
     _handles: List[torch.utils.hooks.RemovableHandle] = field(default_factory=list, repr=False)
@@ -151,6 +154,10 @@ class OptimizationDiagnosticsCallback(Callback):
         if model is None or not isinstance(model, nn.Module):
             return
 
+        optim = getattr(self.trainer.train_module, "optim", None)
+        if self.track_gradient_outliers:
+            self._check_gradient_outliers(model, optim)
+
         if self.track_param_grad_rmse or self.track_param_grad_meanvar:
             for name, param in model.named_parameters():
                 if param.grad is None:
@@ -203,6 +210,71 @@ class OptimizationDiagnosticsCallback(Callback):
         mean = tensor.mean()
         std = tensor.var(unbiased=False).sqrt()
         return mean, std
+
+    def _check_gradient_outliers(self, model: nn.Module, optim):
+        """Check for gradient outliers (values beyond mu ± k*sigma) per parameter using AdamW state."""
+        if optim is None or not hasattr(optim, 'state'):
+            return
+        
+        # Check if optimizer is AdamW-like (has exp_avg and exp_avg_sq)
+        # Works with torch.optim.AdamW and custom AdamW implementations
+        if not any('exp_avg' in state and 'exp_avg_sq' in state for state in optim.state.values()):
+            return
+        
+        for param in optim.state.keys():
+            name = None
+            if self._param_name_map is not None:
+                name = self._param_name_map.get(id(param))
+            if name is None:
+                name = f"param_{id(param)}"
+            
+            if param.grad is None:
+                continue
+            
+            state = optim.state[param]
+            exp_avg = state.get("exp_avg")
+            exp_avg_sq = state.get("exp_avg_sq")
+            
+            # Need both exp_avg and exp_avg_sq to compute mean and std
+            if exp_avg is None or exp_avg_sq is None:
+                continue
+            
+            grad = get_local_tensor(param.grad.detach()).float()
+            
+            # Use AdamW's exponential moving averages to estimate mean and variance
+            # exp_avg is the first moment (mean estimate)
+            # exp_avg_sq is the second moment (used to compute variance)
+            mean_est = get_local_tensor(exp_avg.detach()).float()
+            second_moment = get_local_tensor(exp_avg_sq.detach()).float()
+            
+            # Variance = E[X^2] - E[X]^2
+            variance = second_moment - mean_est.pow(2)
+            variance = torch.clamp(variance, min=0)  # Ensure non-negative due to numerical issues
+            std_est = variance.sqrt()
+            
+            # Check for outliers at multiple k-sigma thresholds (4 and 6)
+            for k in [4.0, self.gradient_outlier_k]:
+                lower_bound = mean_est - k * std_est
+                upper_bound = mean_est + k * std_est
+                
+                # Count outliers
+                outlier_mask = (grad < lower_bound) | (grad > upper_bound)
+                has_outlier = outlier_mask.any()
+                
+                # Log binary indicator
+                outlier_indicator = torch.tensor(1.0 if has_outlier else 0.0, device=grad.device)
+                self._log_metric(
+                    f"gradient_outliers/{name}/{int(k)}sigma_event",
+                    outlier_indicator,
+                )
+                
+                # Optionally log fraction of outliers
+                if has_outlier:
+                    outlier_frac = outlier_mask.float().mean()
+                    self._log_metric(
+                        f"gradient_outliers/{name}/{int(k)}sigma_fraction",
+                        outlier_frac,
+                    )
 
     def _mean_norm_over_batch_tokens(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compute mean L2 norm over batch/tokens (all dims except the last)."""
