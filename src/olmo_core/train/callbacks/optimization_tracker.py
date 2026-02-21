@@ -257,24 +257,15 @@ class OptimizationDiagnosticsCallback(Callback):
                 lower_bound = mean_est - k * std_est
                 upper_bound = mean_est + k * std_est
                 
-                # Count outliers
+                # Count outliers - compute fraction directly to avoid sync
                 outlier_mask = (grad < lower_bound) | (grad > upper_bound)
-                has_outlier = outlier_mask.any()
+                outlier_frac = outlier_mask.float().mean()
                 
-                # Log binary indicator
-                outlier_indicator = torch.tensor(1.0 if has_outlier else 0.0, device=grad.device)
+                # Log fraction (will be 0.0 if no outliers)
                 self._log_metric(
-                    f"gradient_outliers/{name}/{int(k)}sigma_event",
-                    outlier_indicator,
+                    f"gradient_outliers/{name}/{int(k)}sigma_fraction",
+                    outlier_frac,
                 )
-                
-                # Optionally log fraction of outliers
-                if has_outlier:
-                    outlier_frac = outlier_mask.float().mean()
-                    self._log_metric(
-                        f"gradient_outliers/{name}/{int(k)}sigma_fraction",
-                        outlier_frac,
-                    )
 
     def _mean_norm_over_batch_tokens(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compute mean L2 norm over batch/tokens (all dims except the last)."""
