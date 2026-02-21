@@ -501,12 +501,8 @@ class OptimizationDiagnosticsCallback(Callback):
                 update = current - prev
 
                 if self.track_update_param_ratio:
-                    denom = current.abs()
-                    mask = denom > 0
-                    if mask.any():
-                        ratio = (update.abs()[mask] / denom[mask]).mean()
-                    else:
-                        ratio = torch.tensor(0.0, device=current.device)
+                    denom = current.abs().clamp(min=self.eps)
+                    ratio = (update.abs() / denom).mean()
                     self._log_metric(f"params/{name}/update_param_ratio", ratio)
 
                 if self.track_update_rmse:
