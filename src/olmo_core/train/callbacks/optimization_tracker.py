@@ -291,16 +291,12 @@ class OptimizationDiagnosticsCallback(Callback):
         return mean, std
 
     def _log_embedding_metrics(self):
-        if not self._embedding_token_ids:
-            return
-
-        # Collect all token IDs from all forward passes in this step
+        # Always log metrics on all ranks to avoid collective mismatch
         all_token_ids = []
-        for batch_token_ids in self._embedding_token_ids:
-            all_token_ids.extend(batch_token_ids.view(-1).tolist())
-
-        if not all_token_ids:
-            return
+        if self._embedding_token_ids:
+            # Collect all token IDs from all forward passes in this step
+            for batch_token_ids in self._embedding_token_ids:
+                all_token_ids.extend(batch_token_ids.view(-1).tolist())
 
         # Count activations per token
         activation_counts = {}
@@ -319,7 +315,10 @@ class OptimizationDiagnosticsCallback(Callback):
         if counts:
             counts_tensor = torch.tensor(counts, dtype=torch.float32)
             median_count = torch.median(counts_tensor)
-            self._log_metric("embeddings/median_activation_count", median_count)
+        else:
+            # Use 0.0 as sentinel value when no data
+            median_count = torch.tensor(0.0)
+        self._log_metric("embeddings/median_activation_count", median_count)
 
     def _make_residual_stream_forward_hook(self, name: str):
         def hook(module: nn.Module, inputs: Tuple[torch.Tensor, torch.Tensor], output: torch.Tensor):
