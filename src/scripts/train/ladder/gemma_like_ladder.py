@@ -518,7 +518,9 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             weight_decay=0.1,
             betas=(0.9, 0.95),
             group_overrides=[
-                OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0))
+                OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0)),
+                OptimGroupOverride(params=["*norm*.weight"], opts=dict(weight_decay=0.0)),
+                OptimGroupOverride(params=["*norm*.bias"], opts=dict(weight_decay=0.0)),
             ],
         ),
         scheduler=CosWithWarmupAndLinearDecay(
