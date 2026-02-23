@@ -8,7 +8,7 @@ from ..distributed.utils import get_fs_local_rank, get_rank, get_world_size
 from ..exceptions import OLMoConfigurationError
 from ..utils import get_default_device
 from .evaluator import Evaluator
-from .metrics import MeanMetric
+from .metrics import MeanMetricWithVariance
 
 
 class LMEvaluator(Evaluator):
@@ -34,7 +34,7 @@ class LMEvaluator(Evaluator):
         device: Optional[torch.device] = None,
     ):
         super().__init__(name=name, batches=batches, device=device)
-        self.metrics = {label: MeanMetric(device=device) for label in labels}
+        self.metrics = {label: MeanMetricWithVariance(device=device) for label in labels}
 
     @classmethod
     def from_numpy_dataset(
@@ -109,8 +109,10 @@ class LMEvaluator(Evaluator):
             # This can happen when the evaluator contains multiple tasks/datasets and we didn't
             # get to this one within the current evaluation loop.
             metric.update(0.0, 0.0)
-            ce_loss = metric.compute()  # could be nan but that's okay.
+            mean, variance, sem = metric.compute_variance()
+            ce_loss = mean
             out[f"{label}/CE loss"] = ce_loss
+            out[f"{label}/CE loss SEM"] = sem  # Standard error of the mean
             out[f"{label}/PPL"] = torch.exp(ce_loss)
         return out
 
