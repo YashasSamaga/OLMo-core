@@ -65,6 +65,7 @@ class LayerNormConfig(ModuleConfig):
     bias: Optional[bool] = None
     full_precision: Optional[bool] = None
     dtype: Optional[DType] = None
+    one_plus_gamma: Optional[bool] = None
 
     def num_params(self, size: int) -> int:
         """
@@ -99,6 +100,7 @@ class LayerNormConfig(ModuleConfig):
 
         try:
             if self.name == LayerNormType.default:
+                kwargs.pop("one_plus_gamma", None)
                 return LayerNorm(size=size, init_device=init_device, **kwargs)
             elif self.name == LayerNormType.rms:
                 return RMSNorm(size=size, init_device=init_device, **kwargs)
@@ -107,6 +109,7 @@ class LayerNormConfig(ModuleConfig):
             elif self.name == LayerNormType.fused_rms:
                 return FusedRMSNorm(size=size, init_device=init_device, **kwargs)
             elif self.name == LayerNormType.l2_norm:
+                kwargs.pop("one_plus_gamma", None)
                 return L2Norm(size=size, **kwargs)
             else:
                 raise NotImplementedError(self.name)
@@ -203,7 +206,34 @@ class LayerNorm(nn.Module):
 class RMSNorm(LayerNorm):
     """
     RMSNorm, a simplified layer norm implementation.
+
+    :param one_plus_gamma: If ``True``, reparameterize the affine weight as ``1 + gamma``
+        where ``gamma`` is initialized to zero. This keeps the initial transformation close
+        to the identity while still allowing the norm to learn scaling.
     """
+
+    def __init__(self, *, one_plus_gamma: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.one_plus_gamma = one_plus_gamma
+        # super().__init__ called reset_parameters() before one_plus_gamma was set;
+        # call it again now that the flag is in place.
+        if one_plus_gamma:
+            self.reset_parameters()
+
+    def reset_parameters(self):
+        if getattr(self, "one_plus_gamma", False):
+            if self.weight is not None:
+                torch.nn.init.zeros_(self.weight)
+            if self.bias is not None:
+                torch.nn.init.zeros_(self.bias)
+        else:
+            super().reset_parameters()
+
+    def _effective_weight(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        if self.weight is None:
+            return None
+        w = self.weight.type_as(x)
+        return (1.0 + w) if self.one_plus_gamma else w
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -220,11 +250,12 @@ class RMSNorm(LayerNorm):
             variance = x.pow(2).mean(-1, keepdim=True)
             x = x * torch.rsqrt(variance + self.eps)
 
-            if self.weight is not None:
+            w = self._effective_weight(x)
+            if w is not None:
                 if self.bias is not None:
-                    x = self.weight.type_as(x) * x + self.bias.type_as(x)
+                    x = w * x + self.bias.type_as(x)
                 else:
-                    x = self.weight.type_as(x) * x
+                    x = w * x
 
             return x.to(og_dtype)
 
@@ -271,7 +302,7 @@ class CuTeRMSNorm(RMSNorm):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self._rms_norm_fn(
             x,
-            weight=None if self.weight is None else self.weight.type_as(x),
+            weight=self._effective_weight(x),
             bias=None if self.bias is None else self.bias.type_as(x),
             eps=self.eps,
         ).to(x.dtype)
@@ -328,7 +359,7 @@ class FusedRMSNorm(RMSNorm):
             x = x.float()
         return self._rms_norm_fn(
             x,
-            self.weight.type_as(x),
+            self._effective_weight(x),
             None if self.bias is None else self.bias.type_as(x),
             eps=self.eps,
         ).to(og_dtype)

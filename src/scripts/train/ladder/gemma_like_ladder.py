@@ -257,6 +257,7 @@ class GemmaLikeTransformerConfig(TransformerConfig):
             eps=layer_norm_eps,
             bias=False,
             dtype=dtype,
+            one_plus_gamma=True,
         )
 
         feed_forward = FeedForwardConfig(
@@ -793,7 +794,6 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             betas=(0.9, 0.95),
             group_overrides=[
                 OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0)),
-                OptimGroupOverride(params=["*norm.weight"], opts=dict(weight_decay=0.0)),
             ],
         ),
         scheduler=CosWithWarmupAndLinearDecay(
