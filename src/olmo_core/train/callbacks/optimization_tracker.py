@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
-
-log = logging.getLogger(__name__)
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+log = logging.getLogger(__name__)
+
 from olmo_core.nn.layer_norm import LayerNorm, RMSNorm
 from olmo_core.nn.residual_stream import ResidualStream
-from olmo_core.distributed.utils import get_local_tensor
+from olmo_core.distributed.utils import get_full_tensor, get_local_tensor
 
 from ..common import MetricMergeStrategy, ReduceType
 from .callback import Callback
@@ -69,7 +69,7 @@ class OptimizationDiagnosticsCallback(Callback):
     track_embedding_usage: bool = False  # Log embedding usage statistics (num activated, avg grad, activation counts).
     
     track_gradient_outliers: bool = False  # Log when gradients exceed mu ± k*sigma (uses AdamW exp_avg/exp_avg_sq)
-    gradient_outlier_k: float = 6.0  # Number of standard deviations for outlier detection
+    gradient_outlier_k: List[float] = field(default_factory=lambda: [4.0, 6.0])  # k-sigma thresholds for outlier detection
     
     namespace: str = "optim_diagnostics"  # Metric namespace prefix.
 
@@ -146,11 +146,6 @@ class OptimizationDiagnosticsCallback(Callback):
         self._handles.clear()
         self._prev_params = None
         self._embedding_token_ids.clear()
-
-    def pre_step(self, batch):
-        del batch
-        if not self._should_log():
-            return
 
     def pre_optim_step(self):
         if not self._should_log():
@@ -289,8 +284,7 @@ class OptimizationDiagnosticsCallback(Callback):
             variance = torch.clamp(variance, min=0)  # Ensure non-negative due to numerical issues
             std_est = variance.sqrt()
 
-            # Check for outliers at multiple k-sigma thresholds (4 and 6)
-            for k in [4.0, self.gradient_outlier_k]:
+            for k in self.gradient_outlier_k:
                 lower_bound = mean_est - k * std_est
                 upper_bound = mean_est + k * std_est
 
@@ -313,7 +307,12 @@ class OptimizationDiagnosticsCallback(Callback):
         return tensor.pow(2).mean(dim=-1).sqrt().mean()
 
     def _vector_meanstd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute mean/stddev per vector (last dim), then average over batch/tokens."""
+        """Exact per-vector mean and stddev (over last dim), averaged over batch/tokens.
+
+        Expects a fully-gathered tensor (not a TP shard). Callers should use
+        ``get_full_tensor()`` before passing when the tensor may be sharded on
+        the last dim under tensor parallelism.
+        """
         mean = tensor.mean(dim=-1).mean()
         std = tensor.var(dim=-1, unbiased=False).sqrt().mean()
         return mean, std
@@ -430,22 +429,16 @@ class OptimizationDiagnosticsCallback(Callback):
             if not isinstance(output, torch.Tensor):
                 return
 
-            if (
-                self.track_activation_rmse
-                or self.track_activation_meanvar
-                or self.track_activation_norm
-            ):
-                act = get_local_tensor(output.detach()).float()
+            if self.track_activation_rmse or self.track_activation_norm or self.track_activation_meanvar:
+                act = get_full_tensor(output.detach()).float()
                 if self.track_activation_rmse:
-                    act_rmse = self._vector_rmse(act)
-                    self._log_metric(f"activations/{name}/rmse", act_rmse)
+                    self._log_metric(f"activations/{name}/rmse", self._vector_rmse(act))
+                if self.track_activation_norm:
+                    self._log_metric(f"activations/{name}/norm", self._mean_norm_over_batch_tokens(act))
                 if self.track_activation_meanvar:
                     act_mean, act_std = self._vector_meanstd(act)
                     self._log_metric(f"activations/{name}/mean", act_mean)
                     self._log_metric(f"activations/{name}/stddev", act_std)
-                if self.track_activation_norm:
-                    act_norm = self._mean_norm_over_batch_tokens(act)
-                    self._log_metric(f"activations/{name}/norm", act_norm)
 
         return hook
 
@@ -461,22 +454,16 @@ class OptimizationDiagnosticsCallback(Callback):
             if not grad_output or grad_output[0] is None or not isinstance(grad_output[0], torch.Tensor):
                 return
 
-            if (
-                self.track_activation_grad_rmse
-                or self.track_activation_grad_meanvar
-                or self.track_activation_grad_norm
-            ):
-                act_grad = get_local_tensor(grad_output[0].detach()).float()
+            if self.track_activation_grad_rmse or self.track_activation_grad_norm or self.track_activation_grad_meanvar:
+                act_grad = get_full_tensor(grad_output[0].detach()).float()
                 if self.track_activation_grad_rmse:
-                    act_grad_rmse = self._vector_rmse(act_grad)
-                    self._log_metric(f"activation_grads/{name}/rmse", act_grad_rmse)
+                    self._log_metric(f"activation_grads/{name}/rmse", self._vector_rmse(act_grad))
+                if self.track_activation_grad_norm:
+                    self._log_metric(f"activation_grads/{name}/norm", self._mean_norm_over_batch_tokens(act_grad))
                 if self.track_activation_grad_meanvar:
                     act_grad_mean, act_grad_std = self._vector_meanstd(act_grad)
                     self._log_metric(f"activation_grads/{name}/mean", act_grad_mean)
                     self._log_metric(f"activation_grads/{name}/stddev", act_grad_std)
-                if self.track_activation_grad_norm:
-                    act_grad_norm = self._mean_norm_over_batch_tokens(act_grad)
-                    self._log_metric(f"activation_grads/{name}/norm", act_grad_norm)
 
         return hook
 
@@ -491,11 +478,12 @@ class OptimizationDiagnosticsCallback(Callback):
             if not isinstance(x, torch.Tensor):
                 return
 
+            x_full = get_full_tensor(x.detach()).float()
             if isinstance(module, RMSNorm):
-                variance = x.pow(2).mean(-1)
+                variance = x_full.pow(2).mean(-1)
             else:
-                mean = x.mean(-1, keepdim=True)
-                variance = (x - mean).pow(2).mean(-1)
+                x_mean = x_full.mean(-1, keepdim=True)
+                variance = (x_full - x_mean).pow(2).mean(-1)
 
             eps = getattr(module, "eps", None)
             if eps is None:
@@ -529,13 +517,6 @@ class OptimizationDiagnosticsCallback(Callback):
             or self.track_update_rmse
             or self.track_param_movement
         ) and self._prev_params is not None:
-            step_factor = 1.0
-            if optim is not None and hasattr(optim, "step_skipped"):
-                try:
-                    step_factor = 1.0 - float(optim.step_skipped().item())
-                except Exception:
-                    step_factor = 1.0
-
             for name, p in model.named_parameters():
                 if not p.requires_grad:
                     continue
@@ -555,12 +536,8 @@ class OptimizationDiagnosticsCallback(Callback):
                     self._log_metric(f"params/{name}/update_rmse", update_rmse)
                 
                 if self.track_param_movement:
-                    # Count parameters that moved more than threshold relative to their magnitude
-                    param_abs = prev.abs()
-                    rel_change = update.abs() / (param_abs + self.eps)
-                    moving_count = (rel_change > self.param_movement_threshold).float().sum()
-                    total_count = torch.tensor(float(rel_change.numel()), device=rel_change.device)
-                    moving_frac = moving_count / total_count
+                    rel_change = update.abs() / (prev.abs() + self.eps)
+                    moving_frac = (rel_change > self.param_movement_threshold).float().mean()
                     self._log_metric(
                         f"params/{name}/moving_fraction_gt_rel_{self.param_movement_threshold}",
                         moving_frac,
@@ -626,26 +603,22 @@ class OptimizationDiagnosticsCallback(Callback):
             if logits is None or not isinstance(logits, torch.Tensor):
                 return
 
-            # Use full logits tensor (don't shard) for correct softmax and statistics
-            logits_tensor = logits.detach().float()
-            logits_flat = logits_tensor.view(-1, logits_tensor.shape[-1])
-            probs = torch.softmax(logits_flat, dim=-1)
+            # Logit statistics are valid on any shard (no cross-vocab dependencies).
+            logits_local = get_local_tensor(logits.detach()).float()
+            logits_flat_local = logits_local.view(-1, logits_local.shape[-1])
+            self._log_metric("lm_head/logit_max", logits_flat_local.max(dim=-1)[0].mean())
+            self._log_metric("lm_head/logit_min", logits_flat_local.min(dim=-1)[0].mean())
+            self._log_metric("lm_head/logit_avg", logits_flat_local.mean())
+            self._log_metric("lm_head/logit_std", logits_flat_local.std())
 
-            top1_mass = probs.max(dim=-1)[0].mean()
-            self._log_metric("lm_head/top1_mass", top1_mass)
-
-            entropy = -(probs * torch.log(probs + self.eps)).sum(dim=-1).mean()
-            self._log_metric("lm_head/entropy", entropy)
-
-            max_logit = logits_flat.max(dim=-1)[0].mean()
-            min_logit = logits_flat.min(dim=-1)[0].mean()
-            avg_logit = logits_flat.mean(dim=-1).mean()
-            logit_std = logits_flat.std()
-
-            self._log_metric("lm_head/logit_max", max_logit)
-            self._log_metric("lm_head/logit_min", min_logit)
-            self._log_metric("lm_head/logit_avg", avg_logit)
-            self._log_metric("lm_head/logit_std", logit_std)
+            # top1_mass and entropy require softmax over the full vocab. For
+            # vocab-parallel TP, get_full_tensor() gathers the shards via DTensor
+            # before computing softmax. For non-TP runs it is a no-op.
+            logits_full = get_full_tensor(logits.detach()).float()
+            logits_flat_full = logits_full.view(-1, logits_full.shape[-1])
+            probs = torch.softmax(logits_flat_full, dim=-1)
+            self._log_metric("lm_head/top1_mass", probs.max(dim=-1)[0].mean())
+            self._log_metric("lm_head/entropy", -(probs * torch.log(probs + self.eps)).sum(dim=-1).mean())
 
         return hook
 
