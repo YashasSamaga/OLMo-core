@@ -554,10 +554,9 @@ class OptimizationDiagnosticsCallback(Callback):
             for name, p in model.named_parameters():
                 if not p.requires_grad:
                     continue
-                mean = get_local_tensor(p.detach()).float().mean()
-                self._log_metric(f"params/{name}/mean", mean)
-                std = get_local_tensor(p.detach()).float().var(unbiased=False).sqrt()
-                self._log_metric(f"params/{name}/stddev", std)
+                p_local = get_local_tensor(p.detach()).float()
+                self._log_metric(f"params/{name}/mean", p_local.mean())
+                self._log_metric(f"params/{name}/stddev", p_local.var(unbiased=False).sqrt())
 
         if self.track_optimizer_state_rmse_meanvar and optim is not None:
             for param, state in optim.state.items():
