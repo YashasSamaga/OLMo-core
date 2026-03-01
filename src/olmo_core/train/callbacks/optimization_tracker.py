@@ -327,18 +327,23 @@ class OptimizationDiagnosticsCallback(Callback):
                 activation_counts[token_id_int] = 0
             activation_counts[token_id_int] += 1
 
+        device = self.trainer.device
+
         # Number of embeddings activated (unique token IDs used)
         num_activated = len(activation_counts)
-        self._log_metric("embeddings/num_activated", torch.tensor(float(num_activated)))
+        self._log_metric(
+            "embeddings/num_activated",
+            torch.tensor(float(num_activated), device=device),
+        )
 
         # Median count of activations per embedding token
         counts = list(activation_counts.values())
         if counts:
-            counts_tensor = torch.tensor(counts, dtype=torch.float32)
+            counts_tensor = torch.tensor(counts, dtype=torch.float32, device=device)
             median_count = torch.median(counts_tensor)
         else:
             # Use 0.0 as sentinel value when no data
-            median_count = torch.tensor(0.0)
+            median_count = torch.tensor(0.0, device=device)
         self._log_metric("embeddings/median_activation_count", median_count)
 
     def _make_residual_stream_forward_hook(self, name: str):
