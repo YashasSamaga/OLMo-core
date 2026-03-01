@@ -216,6 +216,10 @@ class OptimizationDiagnosticsCallback(Callback):
 
     def _check_gradient_outliers(self, model: nn.Module, optim):
         """Check for gradient outliers (values beyond mu ± k*sigma) per parameter using AdamW state."""
+        # This must be called at pre_optim_step or later, where FSDP has completed
+        # gradient all-reduce and the optimizer has not yet updated exp_avg / exp_avg_sq.
+        # Reads of grad and optimizer state are therefore coherent without an explicit
+        # stream sync. Moving this to an earlier hook may require adding one.
         if optim is None or not hasattr(optim, 'state'):
             return
 
