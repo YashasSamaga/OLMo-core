@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 import torch
 import torch.nn as nn
@@ -215,52 +218,79 @@ class OptimizationDiagnosticsCallback(Callback):
         """Check for gradient outliers (values beyond mu ± k*sigma) per parameter using AdamW state."""
         if optim is None or not hasattr(optim, 'state'):
             return
-        
+
         # Check if optimizer is AdamW-like (has exp_avg and exp_avg_sq)
         # Works with torch.optim.AdamW and custom AdamW implementations
         if not any('exp_avg' in state and 'exp_avg_sq' in state for state in optim.state.values()):
             return
-        
+
+        # Build param -> betas map so bias correction uses the correct per-group betas.
+        param_to_betas: dict = {}
+        missing_betas_warned: set = set()
+        for group in optim.param_groups:
+            if "betas" not in group:
+                continue
+            for p in group["params"]:
+                param_to_betas[id(p)] = group["betas"]
+
         for param in optim.state.keys():
             name = None
             if self._param_name_map is not None:
                 name = self._param_name_map.get(id(param))
             if name is None:
                 name = f"param_{id(param)}"
-            
+
             if param.grad is None:
                 continue
-            
+
             state = optim.state[param]
             exp_avg = state.get("exp_avg")
             exp_avg_sq = state.get("exp_avg_sq")
-            
-            # Need both exp_avg and exp_avg_sq to compute mean and std
+            step_tensor = state.get("step")
+
+            # Need both moments to compute mean and std
             if exp_avg is None or exp_avg_sq is None:
                 continue
-            
+
             grad = get_local_tensor(param.grad.detach()).float()
-            
-            # Use AdamW's exponential moving averages to estimate mean and variance
-            # exp_avg is the first moment (mean estimate)
-            # exp_avg_sq is the second moment (used to compute variance)
             mean_est = get_local_tensor(exp_avg.detach()).float()
             second_moment = get_local_tensor(exp_avg_sq.detach()).float()
-            
+
+            # Apply bias correction so the estimates are accurate regardless of beta2.
+            # The stored exp_avg / exp_avg_sq are raw EMAs initialised at zero, so they
+            # underestimate the true moments by (1 - beta^t) until fully warmed up.
+            # This matters especially with large beta2 values (e.g. 0.999).
+            if step_tensor is not None:
+                betas = param_to_betas.get(id(param))
+                if betas is None:
+                    if name not in missing_betas_warned:
+                        log.warning(
+                            "Could not find betas for param '%s' in optimizer param groups; "
+                            "skipping bias correction for gradient outlier detection.",
+                            name,
+                        )
+                        missing_betas_warned.add(name)
+                else:
+                    beta1, beta2 = betas
+                    step = step_tensor.item()
+                    if step > 0:
+                        mean_est = mean_est / (1 - beta1 ** step)
+                        second_moment = second_moment / (1 - beta2 ** step)
+
             # Variance = E[X^2] - E[X]^2
             variance = second_moment - mean_est.pow(2)
             variance = torch.clamp(variance, min=0)  # Ensure non-negative due to numerical issues
             std_est = variance.sqrt()
-            
+
             # Check for outliers at multiple k-sigma thresholds (4 and 6)
             for k in [4.0, self.gradient_outlier_k]:
                 lower_bound = mean_est - k * std_est
                 upper_bound = mean_est + k * std_est
-                
+
                 # Count outliers - compute fraction directly to avoid sync
                 outlier_mask = (grad < lower_bound) | (grad > upper_bound)
                 outlier_frac = outlier_mask.float().mean()
-                
+
                 # Log fraction (will be 0.0 if no outliers)
                 self._log_metric(
                     f"gradient_outliers/{name}/{int(k)}sigma_fraction",
