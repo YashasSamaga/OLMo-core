@@ -21,6 +21,7 @@ from .list_checkpointer import ListCheckpointerCallback
 from .metric_saver import MetricSaverCallback
 from .model_merger import ModelMergeCallback
 from .monkey_patcher import MonkeyPatcherCallback
+from .optimization_tracker import OptimizationDiagnosticsCallback
 from .profiler import ProfilerCallback
 from .sequence_length_scheduler import SequenceLengthSchedulerCallback
 from .slack_notifier import SlackNotificationSetting, SlackNotifierCallback
@@ -56,6 +57,7 @@ __all__ = [
     "MetricSaverCallback",
     "ModelMergeCallback",
     "ListCheckpointerCallback",
+    "OptimizationDiagnosticsCallback",
 ]
 
 __doc__ += "\n"

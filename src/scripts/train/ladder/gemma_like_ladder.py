@@ -8,7 +8,7 @@ import argparse
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 from olmo_core.config import DType, StrEnum
 from olmo_core.data import (
@@ -57,6 +57,7 @@ from olmo_core.train.callbacks import (
     CometCallback,
     DownstreamEvaluatorCallbackConfig,
     LMEvaluatorCallbackConfig,
+    OptimizationDiagnosticsCallback,
     SpeedMonitorCallback,
     StabilityMonitorCallback,
     WandBCallback,
@@ -840,6 +841,35 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
         .with_callback("speed_monitor", SpeedMonitorCallback())
         .with_callback("stability_monitor", StabilityMonitorCallback(enabled=True))
         .with_callback(
+            "optimization_diagnostics",
+            OptimizationDiagnosticsCallback(
+                enabled=False,
+                log_interval=None,
+                eps=1e-8,
+                track_residual_updates=False,
+                eps_hit_tolerance=0.1,
+                track_layer_norm_eps=False,
+                track_param_grad_rmse=False,
+                track_param_grad_meanvar=False,
+                track_gradient_outliers=False,
+                gradient_outlier_k=6.0,
+                track_param_meanvar=False,
+                track_update_param_ratio=False,
+                track_activation_rmse=False,
+                track_activation_meanvar=False,
+                track_activation_norm=False,
+                track_activation_grad_rmse=False,
+                track_activation_grad_meanvar=False,
+                track_activation_grad_norm=False,
+                track_update_rmse=False,
+                track_optimizer_state_rmse_meanvar=False,
+                track_lm_head=False,
+                track_param_movement=False,
+                track_embedding_usage=False,
+                namespace="optim_diagnostics",
+            ),
+        )
+        .with_callback(
             "comet",
             CometCallback(
                 name=cli_context.run_name,
@@ -899,7 +929,15 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     )
 
     # Merge remaining overrides (multipliers have been removed)
-    return experiment_config.merge(overrides)
+    merged_config = experiment_config.merge(overrides)
+
+    # Inject full config into WandB for experiment reproducibility.
+    if "wandb" in merged_config.trainer.callbacks:
+        cast(WandBCallback, merged_config.trainer.callbacks["wandb"]).config = (
+            merged_config.as_dict()
+        )
+
+    return merged_config
 
 
 if __name__ == "__main__":
