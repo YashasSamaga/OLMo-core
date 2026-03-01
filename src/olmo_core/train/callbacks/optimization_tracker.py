@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 log = logging.getLogger(__name__)
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from olmo_core.nn.layer_norm import LayerNorm, RMSNorm
@@ -77,6 +78,7 @@ class OptimizationDiagnosticsCallback(Callback):
     _param_name_map: Optional[Dict[int, str]] = field(default=None, repr=False)
 
     _embedding_token_ids: List[torch.Tensor] = field(default_factory=list, repr=False)  # Token IDs seen in forward pass
+    _embedding_vocab_size: Optional[int] = field(default=None, repr=False)
 
     def post_attach(self):
         if not self.enabled:
@@ -133,6 +135,7 @@ class OptimizationDiagnosticsCallback(Callback):
         if self.track_embedding_usage:
             embeddings = getattr(model, "embeddings", None)
             if embeddings is not None and isinstance(embeddings, nn.Embedding):
+                self._embedding_vocab_size = embeddings.num_embeddings
                 self._handles.append(
                     embeddings.register_forward_hook(self._make_embedding_forward_hook())
                 )
@@ -316,39 +319,52 @@ class OptimizationDiagnosticsCallback(Callback):
         return mean, std
 
     def _log_embedding_metrics(self):
-        # Always log metrics on all ranks to avoid collective mismatch
-        all_token_ids = []
-        if self._embedding_token_ids:
-            # Collect all token IDs from all forward passes in this step
-            for batch_token_ids in self._embedding_token_ids:
-                all_token_ids.extend(batch_token_ids.view(-1).tolist())
-
-        # Count activations per token
-        activation_counts = {}
-        for token_id in all_token_ids:
-            token_id_int = int(token_id)
-            if token_id_int not in activation_counts:
-                activation_counts[token_id_int] = 0
-            activation_counts[token_id_int] += 1
-
+        # Always log metrics on all ranks to avoid collective mismatch.
+        # Under data parallelism each rank sees a different micro-batch, so each
+        # rank only counts activations from its own portion of the global batch.
+        # We accumulate per-rank counts into a vocab-sized tensor and all_reduce
+        # (SUM) so the resulting counts reflect the full global batch.
         device = self.trainer.device
+        vocab_size = self._embedding_vocab_size
 
-        # Number of embeddings activated (unique token IDs used)
-        num_activated = len(activation_counts)
-        self._log_metric(
-            "embeddings/num_activated",
-            torch.tensor(float(num_activated), device=device),
+        if vocab_size is None:
+            return
+
+        # Build local per-token activation counts as a [vocab_size] tensor.
+        # Concatenate all batches first to issue a single bincount kernel rather
+        # than one scatter_add_ per gradient-accumulation microstep.
+        if self._embedding_token_ids:
+            all_ids = torch.cat([t.view(-1) for t in self._embedding_token_ids]).to(
+                device=device, dtype=torch.long
+            )
+            counts = torch.bincount(all_ids, minlength=vocab_size).float()
+        else:
+            counts = torch.zeros(vocab_size, dtype=torch.float32, device=device)
+
+        # Reduce across all ranks to get global counts.
+        # After this, all ranks hold identical global counts.
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+
+        # num_activated: number of token IDs with at least one activation globally.
+        num_activated = (counts > 0).sum().float()
+        self.trainer.record_metric(
+            f"{self.namespace}/embeddings/num_activated",
+            num_activated,
+            reduce_type=None,  # already globally reduced above
         )
 
-        # Median count of activations per embedding token
-        counts = list(activation_counts.values())
-        if counts:
-            counts_tensor = torch.tensor(counts, dtype=torch.float32, device=device)
-            median_count = torch.median(counts_tensor)
+        # Median activation count over the activated tokens.
+        activated_counts = counts[counts > 0]
+        if activated_counts.numel() > 0:
+            median_count = torch.median(activated_counts)
         else:
-            # Use 0.0 as sentinel value when no data
             median_count = torch.tensor(0.0, device=device)
-        self._log_metric("embeddings/median_activation_count", median_count)
+        self.trainer.record_metric(
+            f"{self.namespace}/embeddings/median_activation_count",
+            median_count,
+            reduce_type=None,  # already globally reduced above
+        )
 
     def _make_residual_stream_forward_hook(self, name: str):
         def hook(module: nn.Module, inputs: Tuple[torch.Tensor, torch.Tensor], output: torch.Tensor):
