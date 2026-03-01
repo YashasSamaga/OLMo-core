@@ -646,6 +646,6 @@ class OptimizationDiagnosticsCallback(Callback):
 
             token_ids = inputs[0]
             # Store token IDs for this batch
-            self._embedding_token_ids.append(token_ids.detach().cpu())
+            self._embedding_token_ids.append(token_ids.detach())
 
         return hook
