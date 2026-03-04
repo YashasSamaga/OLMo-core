@@ -574,6 +574,19 @@ def handle_custom_args(
         choices=list(DataMix),
         default=str(DataMix.OLMo_mix_0925),
     )
+    parser.add_argument(
+        "--lnwd-mode",
+        type=str,
+        choices=["all", "only_qk_lnwd", "only_block_lnwd", "disabled"],
+        default="all",
+        help=(
+            "Controls which layer norm weights have weight decay. "
+            "'all': WD on all norms, "
+            "'only_qk_lnwd': WD only on QK norms (block/LM-head norms get WD=0), "
+            "'only_block_lnwd': WD only on block/LM-head norms (QK norms get WD=0), "
+            "'disabled': no WD on any norm (default)."
+        ),
+    )
 
     # Extract argument names from parser (both value-based and boolean flags)
     arg_prefixes: List[str] = []
@@ -675,6 +688,48 @@ def parse_model_size(run_name: str) -> GemmaLikeOlmoV2:
     )
 
 
+def _get_norm_wd_overrides(lnwd_mode: str) -> List[OptimGroupOverride]:
+    """
+    Return the optimizer group overrides for norm weight decay based on ``lnwd_mode``.
+
+    :param lnwd_mode: One of ``"all"``, ``"only_qk_lnwd"``, ``"only_block_lnwd"``, or ``"disabled"``.
+
+        - ``"all"``: WD on all norm weights (no override needed).
+        - ``"only_qk_lnwd"``: WD only on QK norms; remove WD from block/LM-head norms
+          (``*attention_norm.weight``, ``*feed_forward_norm.weight``, ``lm_head.norm.weight``).
+        - ``"only_block_lnwd"``: WD only on block/LM-head norms; remove WD from QK norms
+          (``*q_norm.weight``, ``*k_norm.weight``).
+        - ``"disabled"``: No WD on any norm weights (``*norm.weight`` → WD=0).
+    """
+    if lnwd_mode == "all":
+        return []
+    elif lnwd_mode == "only_qk_lnwd":
+        # Only QK norms keep WD — remove WD from block/LM-head norms.
+        # *attention_norm.weight matches attention_norm and post_attention_norm.
+        # *feed_forward_norm.weight matches feed_forward_norm and post_feed_forward_norm.
+        return [
+            OptimGroupOverride(
+                params=[
+                    "*attention_norm.weight",
+                    "*feed_forward_norm.weight",
+                    "lm_head.norm.weight",
+                ],
+                opts=dict(weight_decay=0.0),
+            )
+        ]
+    elif lnwd_mode == "only_block_lnwd":
+        # Only block/LM-head norms keep WD — remove WD from QK norms.
+        return [
+            OptimGroupOverride(
+                params=["*q_norm.weight", "*k_norm.weight"], opts=dict(weight_decay=0.0)
+            )
+        ]
+    elif lnwd_mode == "disabled":
+        return [OptimGroupOverride(params=["*norm.weight"], opts=dict(weight_decay=0.0))]
+    else:
+        raise ValueError(f"Unknown lnwd_mode: {lnwd_mode!r}")
+
+
 def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     """
     Build experiment config for GL-OLMo v2.
@@ -720,6 +775,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     no_beaker_launch = custom_args.no_beaker_launch
     use_gdn = custom_args.use_gdn
     attn_backend = custom_args.attn_backend
+    lnwd_mode = custom_args.lnwd_mode
 
     sequence_length = DEFAULT_SEQUENCE_LENGTH
     root_dir = custom_args.root_dir or get_root_dir(cli_context.cluster)
@@ -795,7 +851,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             betas=(0.9, 0.95),
             group_overrides=[
                 OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0)),
-                OptimGroupOverride(params=["*norm.weight"], opts=dict(weight_decay=0.0))
+                *_get_norm_wd_overrides(lnwd_mode),
             ],
         ),
         scheduler=CosWithWarmupAndLinearDecay(
