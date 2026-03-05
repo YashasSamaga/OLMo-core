@@ -42,6 +42,7 @@ class OptimizationDiagnosticsCallback(Callback):
 
     eps_hit_tolerance: float = 0.1  # Extra fractional slack above eps to count as a hit.
     track_layer_norm_eps: bool = False  # Log eps-hit indicators for LayerNorm/RMSNorm.
+    track_norm_weight_scale: bool = False  # Log RMS and abs_max of effective norm weight per RMSNorm module.
 
     track_param_grad_rmse: bool = False  # Log per-parameter grad RMSE.
     track_param_grad_meanvar: bool = False  # Log per-parameter grad mean/stddev.
@@ -578,6 +579,17 @@ class OptimizationDiagnosticsCallback(Callback):
 
         if self.track_embedding_usage:
             self._log_embedding_metrics()
+
+        if self.track_norm_weight_scale and model is not None:
+            for name, module in model.named_modules():
+                if not isinstance(module, RMSNorm) or module.weight is None:
+                    continue
+                w = get_local_tensor(module.weight.detach()).float()
+                if getattr(module, "one_plus_gamma", False):
+                    w = 1.0 + w  # effective weight
+                self._log_metric(f"norm_weight_scale/{name}/rms", self._rmse(w))
+                self._log_metric(f"norm_weight_scale/{name}/abs_max", w.abs().max())
+
 
         self._prev_params = None
         self._embedding_token_ids.clear()

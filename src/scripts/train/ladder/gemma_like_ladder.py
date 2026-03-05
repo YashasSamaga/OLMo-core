@@ -923,6 +923,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
                 track_lm_head=False,
                 track_param_movement=False,
                 track_embedding_usage=False,
+                track_norm_weight_scale=False,
                 namespace="optim_diagnostics",
             ),
         )
