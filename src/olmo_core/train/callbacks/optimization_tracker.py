@@ -600,6 +600,8 @@ class OptimizationDiagnosticsCallback(Callback):
                 w = get_full_tensor(module.weight.detach()).float()
                 if getattr(module, "one_plus_gamma", False):
                     w = 1.0 + w  # effective weight
+                if hasattr(module, "alpha_scale"):
+                    w = get_full_tensor(module.alpha_scale.detach()).float() * w
                 if self.track_norm_weight_scale:
                     self._log_metric(f"norm_weight_scale/{name}/rms", self._rmse(w))
                     self._log_metric(f"norm_weight_scale/{name}/abs_max", w.abs().max())

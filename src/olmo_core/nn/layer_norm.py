@@ -15,6 +15,7 @@ __all__ = [
     "LayerNormConfig",
     "LayerNorm",
     "RMSNorm",
+    "FactoredRMSNorm",
     "CuTeRMSNorm",
     "FusedRMSNorm",
     "L2Norm",
@@ -41,6 +42,10 @@ class LayerNormType(StrEnum):
     fused_rms = "fused_rms"
     """
     ➡️ :class:`FusedRMSNorm`
+    """
+    factored_rms = "factored_rms"
+    """
+    ➡️ :class:`FactoredRMSNorm`
     """
     l2_norm = "l2_norm"
     """
@@ -83,6 +88,8 @@ class LayerNormConfig(ModuleConfig):
             ln_params += size
             if bias:
                 ln_params += size
+            if self.name == LayerNormType.factored_rms:
+                ln_params += 1  # alpha_scale scalar
         return ln_params
 
     def build(self, size: int, init_device: str = "cpu") -> "LayerNorm":
@@ -106,6 +113,8 @@ class LayerNormConfig(ModuleConfig):
                 return CuTeRMSNorm(size=size, init_device=init_device, **kwargs)
             elif self.name == LayerNormType.fused_rms:
                 return FusedRMSNorm(size=size, init_device=init_device, **kwargs)
+            elif self.name == LayerNormType.factored_rms:
+                return FactoredRMSNorm(size=size, init_device=init_device, **kwargs)
             elif self.name == LayerNormType.l2_norm:
                 return L2Norm(size=size, **kwargs)
             else:
@@ -225,6 +234,63 @@ class RMSNorm(LayerNorm):
                     x = self.weight.type_as(x) * x + self.bias.type_as(x)
                 else:
                     x = self.weight.type_as(x) * x
+
+            return x.to(og_dtype)
+
+
+class FactoredRMSNorm(RMSNorm):
+    """
+    An RMSNorm variant with a factored weight parameterization: ``alpha * (1 + gamma)``.
+
+    ``gamma`` (the per-coordinate weight, initialized to zero) is regularized by weight
+    decay toward zero, keeping individual coordinates close to uniform scaling.
+    ``alpha`` (a per-norm scalar, initialized to one) controls the overall scale and is
+    intended to be excluded from weight decay so the scale can grow freely without fighting
+    regularization.
+
+    :param size: The size of the input along the dimension to be normalized.
+    :param dtype: Data type for the weight parameters.
+    :param init_device: Device to initialize parameters on.
+    """
+
+    def __init__(
+        self,
+        *,
+        dtype: torch.dtype = torch.float32,
+        init_device: str = "cpu",
+        **kwargs,
+    ):
+        super().__init__(dtype=dtype, init_device=init_device, **kwargs)
+        if self.weight is not None:
+            self.alpha_scale = nn.Parameter(torch.ones(1, dtype=dtype, device=init_device))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.weight is not None:
+            torch.nn.init.zeros_(self.weight)
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
+        if hasattr(self, "alpha_scale"):
+            torch.nn.init.ones_(self.alpha_scale)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply RMSNorm with factored weight ``alpha * (1 + gamma)``.
+
+        :param x: The input.
+        """
+        with torch.autocast(enabled=False, device_type=x.device.type):
+            og_dtype = x.dtype
+
+            if self.full_precision:
+                x = x.float()
+
+            variance = x.pow(2).mean(-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.eps)
+
+            if self.weight is not None:
+                w = self.alpha_scale.type_as(x) * (1.0 + self.weight.type_as(x))
+                x = w * x
 
             return x.to(og_dtype)
 
