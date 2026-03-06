@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -25,12 +25,12 @@ class OptimizationDiagnosticsCallback(Callback):
     """
     Tracks optimization-related diagnostics.
 
-    IMPORTANT: Metrics are computed on each rank's local shard only. We call
-    :func:`get_local_tensor()` and then log with reduce/merge = mean, so the
-    final logged value is the mean of per-rank local-shard statistics, NOT the
-    true global (full-parameter/full-activation) statistic.
+    IMPORTANT: Parameter metrics (norm weight scale/dist) use :func:`get_full_tensor()`
+    and reflect the true global statistic. Activation metrics use :func:`get_local_tensor()`
+    and log with reduce/merge = mean, so the final logged value is the mean of per-rank
+    local-shard statistics, NOT the true global statistic.
 
-    Ratios computed from local norms can differ from ratios computed on the full
+    Ratios computed from local activation norms can differ from ratios computed on the full
     tensors, especially under tensor/model parallelism.
     """
 
@@ -43,6 +43,7 @@ class OptimizationDiagnosticsCallback(Callback):
     eps_hit_tolerance: float = 0.1  # Extra fractional slack above eps to count as a hit.
     track_layer_norm_eps: bool = False  # Log eps-hit indicators for LayerNorm/RMSNorm.
     track_norm_weight_scale: bool = False  # Log RMS and abs_max of effective norm weight per RMSNorm module.
+    track_norm_weight_dist: bool = False  # Log histogram of effective norm weight per RMSNorm module to W&B.
 
     track_param_grad_rmse: bool = False  # Log per-parameter grad RMSE.
     track_param_grad_meanvar: bool = False  # Log per-parameter grad mean/stddev.
@@ -580,15 +581,35 @@ class OptimizationDiagnosticsCallback(Callback):
         if self.track_embedding_usage:
             self._log_embedding_metrics()
 
-        if self.track_norm_weight_scale and model is not None:
+        if (self.track_norm_weight_scale or self.track_norm_weight_dist) and model is not None:
+            from olmo_core.distributed.utils import get_rank
+
+            wandb_callback = None
+            if self.track_norm_weight_dist:
+                from .wandb import WandBCallback
+
+                for cb in self.trainer.callbacks.values():
+                    if isinstance(cb, WandBCallback) and cb.enabled:
+                        wandb_callback = cb
+                        break
+
+            hist_data: Dict[str, Any] = {}
             for name, module in model.named_modules():
                 if not isinstance(module, RMSNorm) or module.weight is None:
                     continue
-                w = get_local_tensor(module.weight.detach()).float()
+                w = get_full_tensor(module.weight.detach()).float()
                 if getattr(module, "one_plus_gamma", False):
                     w = 1.0 + w  # effective weight
-                self._log_metric(f"norm_weight_scale/{name}/rms", self._rmse(w))
-                self._log_metric(f"norm_weight_scale/{name}/abs_max", w.abs().max())
+                if self.track_norm_weight_scale:
+                    self._log_metric(f"norm_weight_scale/{name}/rms", self._rmse(w))
+                    self._log_metric(f"norm_weight_scale/{name}/abs_max", w.abs().max())
+                if wandb_callback is not None:
+                    hist_data[f"{self.namespace}/norm_weight_dist/{name}"] = (
+                        wandb_callback.wandb.Histogram(w.cpu().numpy())
+                    )
+
+            if hist_data and wandb_callback is not None and get_rank() == 0:
+                wandb_callback.wandb.log(hist_data, step=self.step)
 
 
         self._prev_params = None
