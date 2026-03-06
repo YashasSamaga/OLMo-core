@@ -27,6 +27,7 @@ from ..lm_head import LMHeadConfig, LMHeadType
 from ..moe import MoEConfig, MoERouterConfig, MoEType
 from ..rope import RoPEConfig, RoPEScalingConfig, RoPEType
 from .init import InitMethod
+from .mup import MuPConfig
 
 if TYPE_CHECKING:
     from .block import TransformerBlockBase
@@ -328,6 +329,11 @@ class TransformerConfig(ModelConfig):
     block_pattern: Optional[List[str]] = None
     block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None
     embed_scale: Optional[float] = None
+    mup: Optional[MuPConfig] = None
+    """
+    When set, enables muP (Maximal Update Parameterization). The ``base_d_model`` specifies
+    the proxy model width used for hyperparameter tuning.
+    """
 
     def __post_init__(self):
         validate_block_resolution_config(
@@ -344,6 +350,27 @@ class TransformerConfig(ModelConfig):
                 self.n_layers,
                 len(self.block_pattern),
             )
+
+        if self.mup is not None:
+            self._apply_mup_config()
+
+    def _apply_mup_config(self):
+        """Apply muP configuration to attention and LM head settings."""
+        assert self.mup is not None
+
+        # Set logit_scale on LM head if not explicitly set.
+        if self.lm_head.logit_scale is None:
+            self.lm_head.logit_scale = self.mup.logit_scale(self.d_model)
+
+        # Set softmax_scale on attention configs.
+        block_configs = self.resolved_block_configs
+        for bc in block_configs:
+            if isinstance(bc.sequence_mixer, AttentionConfig):
+                if bc.sequence_mixer.softmax_scale is None:
+                    head_dim = bc.sequence_mixer.head_dim or (
+                        self.d_model // bc.sequence_mixer.n_heads
+                    )
+                    bc.sequence_mixer.softmax_scale = self.mup.attn_scale(head_dim)
 
     def build(
         self,
@@ -380,6 +407,7 @@ class TransformerConfig(ModelConfig):
                 block_overrides=self.block_overrides,
                 block_pattern=self.block_pattern,
                 embed_scale=self.embed_scale,
+                mup_base_d_model=self.mup.base_d_model if self.mup else None,
             )
         elif self.name == TransformerType.normalized:
             assert self.embedding_norm is None

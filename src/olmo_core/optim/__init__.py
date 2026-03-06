@@ -10,6 +10,7 @@ from .config import (
 from .dion import DionConfig
 from .lion import Lion, LionConfig, SkipStepLion, SkipStepLionConfig
 from .muon import MuonConfig, NorMuonConfig
+from .mup_adamw import MuPAdamWConfig
 from .noop import NoOpConfig, NoOpOptimizer
 from .scheduler import (
     WSD,
@@ -39,6 +40,7 @@ __all__ = [
     "AdamConfig",
     "LionConfig",
     "Lion",
+    "MuPAdamWConfig",
     "MuonConfig",
     "NorMuonConfig",
     "DionConfig",

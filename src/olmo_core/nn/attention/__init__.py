@@ -201,6 +201,11 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
     dtype: DType = DType.float32
     sliding_window: Optional[SlidingWindowAttentionConfig] = None
     use_head_qk_norm: Optional[bool] = None
+    softmax_scale: Optional[float] = None
+    """
+    Custom softmax scale for attention. When ``None``, defaults to ``1/sqrt(head_dim)``.
+    For muP, set to ``1/head_dim``.
+    """
 
     def num_params(self, d_model: int) -> int:
         """

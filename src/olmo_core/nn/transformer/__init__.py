@@ -21,6 +21,7 @@ from .config import (
 )
 from .init import InitMethod
 from .model import MoETransformer, NormalizedTransformer, Transformer
+from .mup import MuPConfig
 
 __all__ = [
     "TransformerType",
@@ -44,4 +45,5 @@ __all__ = [
     "TransformerDataParallelWrappingStrategy",
     "TransformerActivationCheckpointingMode",
     "InitMethod",
+    "MuPConfig",
 ]

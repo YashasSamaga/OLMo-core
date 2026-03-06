@@ -1,3 +1,4 @@
+import math
 from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
@@ -110,6 +111,7 @@ class InitMethod(StrEnum):
         *,
         d_model: int,
         std: float = 0.02,
+        mup_base_d_model: Optional[int] = None,
         generator: Optional[torch.Generator] = None,
     ):
         if self in (
@@ -119,6 +121,10 @@ class InitMethod(StrEnum):
             InitMethod.fan_in,
         ):
             std = d_model**-0.5
+        # muP: extra 1/sqrt(m) scaling for output head
+        if mup_base_d_model is not None:
+            m_ratio = d_model / mup_base_d_model
+            std = std / math.sqrt(m_ratio)
         init_linear(m, std=std, generator=generator)
 
     def init_attention(

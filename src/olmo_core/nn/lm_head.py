@@ -90,6 +90,10 @@ class LMHeadConfig(ModuleConfig):
     bias: Optional[bool] = None
     dtype: DType = DType.float32
     loss_implementation: LMLossImplementation = LMLossImplementation.default
+    logit_scale: Optional[float] = None
+    """
+    Scaling factor applied to output logits. For muP, set to ``base_d_model / d_model``.
+    """
 
     def num_params(self, d_model: int, vocab_size: int) -> int:
         """
@@ -166,6 +170,7 @@ class LMHead(nn.Module):
         bias: bool = True,
         init_device: str = "cpu",
         loss_implementation: LMLossImplementation = LMLossImplementation.default,
+        logit_scale: Optional[float] = None,
     ):
         super().__init__()
         self.norm = (
@@ -175,6 +180,7 @@ class LMHead(nn.Module):
         self._d_model = d_model
         self._vocab_size = vocab_size
         self._loss_implementation = loss_implementation
+        self._logit_scale = logit_scale
         self._tp_mesh: Optional[DeviceMesh] = None
         self._cp_mesh: Optional[DeviceMesh] = None
 
@@ -243,7 +249,10 @@ class LMHead(nn.Module):
         if labels is None:
             if return_logits is False:
                 raise RuntimeError("'return_logits=False' is only valid when 'labels' is provided")
-            return self.w_out(h)
+            out = self.w_out(h)
+            if self._logit_scale is not None:
+                out = out * self._logit_scale
+            return out
 
         logits: Optional[torch.Tensor]
         loss: torch.Tensor
@@ -251,6 +260,8 @@ class LMHead(nn.Module):
         z_loss: Optional[torch.Tensor]
         if self.loss_implementation == LMLossImplementation.default:
             logits = self.w_out(h)
+            if self._logit_scale is not None:
+                logits = logits * self._logit_scale
             assert logits is not None
             ce_loss, z_loss = cross_entropy_loss(
                 get_local_tensor(logits).view(-1, self.vocab_size),
@@ -265,6 +276,10 @@ class LMHead(nn.Module):
             else:
                 loss = ce_loss
         elif self.loss_implementation == LMLossImplementation.fused_linear:
+            if self._logit_scale is not None:
+                raise OLMoConfigurationError(
+                    "'logit_scale' is not compatible with 'fused_linear' loss implementation"
+                )
             logits = None
             loss, z_loss = fused_linear_cross_entropy_loss(
                 get_local_tensor(h).contiguous().view(-1, self.d_model),

@@ -117,6 +117,7 @@ class Transformer(nn.Module):
         block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None,
         block_pattern: Optional[List[str]] = None,
         embed_scale: Optional[float] = None,
+        mup_base_d_model: Optional[int] = None,
     ):
         super().__init__()
 
@@ -165,6 +166,7 @@ class Transformer(nn.Module):
         self.init_seed = init_seed
         self.init_std = init_std
         self.embedding_init_std = embedding_init_std
+        self._mup_base_d_model = mup_base_d_model
 
         self._cache = cache
         self._pp_enabled = False
@@ -341,6 +343,7 @@ class Transformer(nn.Module):
                 self.lm_head.w_out,
                 d_model=self.d_model,
                 std=self.init_std,
+                mup_base_d_model=self._mup_base_d_model,
                 generator=generator,
             )
 
