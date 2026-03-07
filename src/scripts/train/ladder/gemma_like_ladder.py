@@ -258,6 +258,8 @@ class GemmaLikeTransformerConfig(TransformerConfig):
             eps=layer_norm_eps,
             bias=False,
             dtype=dtype,
+            use_gamma=False,
+            use_alpha=True
         )
 
         feed_forward = FeedForwardConfig(
