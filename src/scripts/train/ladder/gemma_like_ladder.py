@@ -254,12 +254,10 @@ class GemmaLikeTransformerConfig(TransformerConfig):
         local_window_size = 1024
 
         layer_norm = LayerNormConfig(
-            name=LayerNormType.factored_rms,
+            name=LayerNormType.rms,
             eps=layer_norm_eps,
             bias=False,
             dtype=dtype,
-            use_gamma=True,
-            use_alpha=True
         )
 
         feed_forward = FeedForwardConfig(
@@ -796,7 +794,13 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             betas=(0.9, 0.95),
             group_overrides=[
                 OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0)),
-                OptimGroupOverride(params=["*.alpha_scale"], opts=dict(weight_decay=0.0)),
+                OptimGroupOverride(
+                    params=[
+                        "blocks.*.post_attention_norm.weight",
+                        "blocks.*.post_feed_forward_norm.weight",
+                    ],
+                    opts=dict(weight_decay=0.0),
+                ),
             ],
         ),
         scheduler=CosWithWarmupAndLinearDecay(
