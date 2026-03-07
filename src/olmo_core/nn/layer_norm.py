@@ -70,6 +70,8 @@ class LayerNormConfig(ModuleConfig):
     bias: Optional[bool] = None
     full_precision: Optional[bool] = None
     dtype: Optional[DType] = None
+    use_alpha: Optional[bool] = None
+    use_gamma: Optional[bool] = None
 
     def num_params(self, size: int) -> int:
         """
@@ -77,6 +79,13 @@ class LayerNormConfig(ModuleConfig):
 
         :param size: The size of the input along the dimension to be normalized.
         """
+        if self.name == LayerNormType.factored_rms:
+            use_gamma = self.use_gamma if self.use_gamma is not None else True
+            use_alpha = self.use_alpha if self.use_alpha is not None else True
+            n = size if use_gamma else 0
+            n += 1 if use_alpha else 0
+            return n
+
         elementwise_affine = (
             self.elementwise_affine
             if self.elementwise_affine is not None
@@ -88,8 +97,6 @@ class LayerNormConfig(ModuleConfig):
             ln_params += size
             if bias:
                 ln_params += size
-            if self.name == LayerNormType.factored_rms:
-                ln_params += 1  # alpha_scale scalar
         return ln_params
 
     def build(self, size: int, init_device: str = "cpu") -> "LayerNorm":
@@ -104,19 +111,27 @@ class LayerNormConfig(ModuleConfig):
         if (dtype := kwargs.pop("dtype", None)) is not None:
             kwargs.update(dtype=dtype.as_pt())
 
+        # use_alpha / use_gamma only apply to factored_rms; strip for all other types.
+        factored_only = {"use_alpha", "use_gamma"}
+
         try:
             if self.name == LayerNormType.default:
-                return LayerNorm(size=size, init_device=init_device, **kwargs)
+                return LayerNorm(size=size, init_device=init_device,
+                                 **{k: v for k, v in kwargs.items() if k not in factored_only})
             elif self.name == LayerNormType.rms:
-                return RMSNorm(size=size, init_device=init_device, **kwargs)
+                return RMSNorm(size=size, init_device=init_device,
+                               **{k: v for k, v in kwargs.items() if k not in factored_only})
             elif self.name == LayerNormType.cute_rms:
-                return CuTeRMSNorm(size=size, init_device=init_device, **kwargs)
+                return CuTeRMSNorm(size=size, init_device=init_device,
+                                   **{k: v for k, v in kwargs.items() if k not in factored_only})
             elif self.name == LayerNormType.fused_rms:
-                return FusedRMSNorm(size=size, init_device=init_device, **kwargs)
+                return FusedRMSNorm(size=size, init_device=init_device,
+                                    **{k: v for k, v in kwargs.items() if k not in factored_only})
             elif self.name == LayerNormType.factored_rms:
                 return FactoredRMSNorm(size=size, init_device=init_device, **kwargs)
             elif self.name == LayerNormType.l2_norm:
-                return L2Norm(size=size, **kwargs)
+                return L2Norm(size=size,
+                              **{k: v for k, v in kwargs.items() if k not in factored_only})
             else:
                 raise NotImplementedError(self.name)
         except TypeError as e:
@@ -240,15 +255,19 @@ class RMSNorm(LayerNorm):
 
 class FactoredRMSNorm(RMSNorm):
     """
-    An RMSNorm variant with a factored weight parameterization: ``alpha * (1 + gamma)``.
+    An RMSNorm variant with a factored weight parameterization.
 
-    ``gamma`` (the per-coordinate weight, initialized to zero) is regularized by weight
-    decay toward zero, keeping individual coordinates close to uniform scaling.
-    ``alpha`` (a per-norm scalar, initialized to one) controls the overall scale and is
-    intended to be excluded from weight decay so the scale can grow freely without fighting
-    regularization.
+    Supports three modes controlled by ``use_alpha`` and ``use_gamma``:
 
-    :param size: The size of the input along the dimension to be normalized.
+    - ``use_alpha=True, use_gamma=True``: ``alpha * (1 + gamma)`` — full factored form.
+      WD on ``gamma`` regularizes coordinate shape; ``alpha`` is free to grow overall scale.
+    - ``use_alpha=False, use_gamma=True``: ``1 + gamma`` — shape only, no global scale.
+    - ``use_alpha=True, use_gamma=False``: ``alpha`` — global scale only, no per-coordinate shape.
+
+    ``gamma`` is initialized to zero (identity) and ``alpha`` is initialized to one.
+
+    :param use_alpha: If ``True``, include a learnable global scale parameter ``alpha``.
+    :param use_gamma: If ``True``, include learnable per-coordinate shape parameters ``gamma``.
     :param dtype: Data type for the weight parameters.
     :param init_device: Device to initialize parameters on.
     """
@@ -256,12 +275,16 @@ class FactoredRMSNorm(RMSNorm):
     def __init__(
         self,
         *,
+        use_alpha: bool = True,
+        use_gamma: bool = True,
         dtype: torch.dtype = torch.float32,
         init_device: str = "cpu",
         **kwargs,
     ):
+        if not use_gamma:
+            kwargs["elementwise_affine"] = False
         super().__init__(dtype=dtype, init_device=init_device, **kwargs)
-        if self.weight is not None:
+        if use_alpha:
             self.alpha_scale = nn.Parameter(torch.ones(1, dtype=dtype, device=init_device))
         self.reset_parameters()
 
@@ -275,7 +298,7 @@ class FactoredRMSNorm(RMSNorm):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply RMSNorm with factored weight ``alpha * (1 + gamma)``.
+        Apply RMSNorm with factored weight.
 
         :param x: The input.
         """
@@ -289,8 +312,12 @@ class FactoredRMSNorm(RMSNorm):
             x = x * torch.rsqrt(variance + self.eps)
 
             if self.weight is not None:
-                w = self.alpha_scale.type_as(x) * (1.0 + self.weight.type_as(x))
+                w = 1.0 + self.weight.type_as(x)
+                if hasattr(self, "alpha_scale"):
+                    w = self.alpha_scale.type_as(x) * w
                 x = w * x
+            elif hasattr(self, "alpha_scale"):
+                x = self.alpha_scale.type_as(x) * x
 
             return x.to(og_dtype)
 
