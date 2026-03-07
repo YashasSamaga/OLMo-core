@@ -593,22 +593,40 @@ class OptimizationDiagnosticsCallback(Callback):
                         wandb_callback = cb
                         break
 
+            from olmo_core.nn.layer_norm import FactoredRMSNorm
+
             hist_data: Dict[str, Any] = {}
             for name, module in model.named_modules():
-                if not isinstance(module, RMSNorm) or module.weight is None:
+                if not isinstance(module, RMSNorm):
                     continue
-                w = get_full_tensor(module.weight.detach()).float()
-                if getattr(module, "one_plus_gamma", False):
-                    w = 1.0 + w  # effective weight
-                if hasattr(module, "alpha_scale"):
-                    w = get_full_tensor(module.alpha_scale.detach()).float() * w
-                if self.track_norm_weight_scale:
-                    self._log_metric(f"norm_weight_scale/{name}/rms", self._rmse(w))
-                    self._log_metric(f"norm_weight_scale/{name}/abs_max", w.abs().max())
-                if wandb_callback is not None:
-                    hist_data[f"{self.namespace}/norm_weight_dist/{name}"] = (
-                        wandb_callback.wandb.Histogram(w.cpu().numpy())
-                    )
+
+                if isinstance(module, FactoredRMSNorm):
+                    # Log gamma component: (1 + gamma) per-coordinate stats
+                    if module.weight is not None:
+                        w_gamma = 1.0 + get_full_tensor(module.weight.detach()).float()
+                        if self.track_norm_weight_scale:
+                            self._log_metric(f"norm_weight_scale/{name}/gamma_rms", self._rmse(w_gamma))
+                            self._log_metric(f"norm_weight_scale/{name}/gamma_absmax", w_gamma.abs().max())
+                        if wandb_callback is not None:
+                            hist_data[f"{self.namespace}/norm_weight_dist/{name}"] = (
+                                wandb_callback.wandb.Histogram(w_gamma.cpu().numpy())
+                            )
+                    # Log alpha: single scalar per norm
+                    if hasattr(module, "alpha_scale") and self.track_norm_weight_scale:
+                        alpha = get_full_tensor(module.alpha_scale.detach()).float().squeeze()
+                        self._log_metric(f"norm_weight_scale/{name}/alpha", alpha)
+                else:
+                    # Plain RMSNorm: log effective weight
+                    if module.weight is None:
+                        continue
+                    w = get_full_tensor(module.weight.detach()).float()
+                    if self.track_norm_weight_scale:
+                        self._log_metric(f"norm_weight_scale/{name}/rms", self._rmse(w))
+                        self._log_metric(f"norm_weight_scale/{name}/abs_max", w.abs().max())
+                    if wandb_callback is not None:
+                        hist_data[f"{self.namespace}/norm_weight_dist/{name}"] = (
+                            wandb_callback.wandb.Histogram(w.cpu().numpy())
+                        )
 
             if hist_data and wandb_callback is not None and get_rank() == 0:
                 wandb_callback.wandb.log(hist_data, step=self.step)
