@@ -202,8 +202,19 @@ class LayerNorm(nn.Module):
 
 class RMSNorm(LayerNorm):
     """
-    RMSNorm, a simplified layer norm implementation.
+    RMSNorm with a ``1 + gamma`` weight reparameterization.
+
+    The learnable weight ``gamma`` is initialized to zero so that at initialization the
+    scaling is the identity (i.e. effectively ``weight = 1``).  During training the
+    effective per-coordinate scale is ``1 + gamma``, which keeps the residual-stream
+    update small at the start and lets weight decay regularize deviations from identity.
     """
+
+    def reset_parameters(self):
+        if self.weight is not None:
+            torch.nn.init.zeros_(self.weight)
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -222,9 +233,9 @@ class RMSNorm(LayerNorm):
 
             if self.weight is not None:
                 if self.bias is not None:
-                    x = self.weight.type_as(x) * x + self.bias.type_as(x)
+                    x = (1.0 + self.weight.type_as(x)) * x + self.bias.type_as(x)
                 else:
-                    x = self.weight.type_as(x) * x
+                    x = (1.0 + self.weight.type_as(x)) * x
 
             return x.to(og_dtype)
 
