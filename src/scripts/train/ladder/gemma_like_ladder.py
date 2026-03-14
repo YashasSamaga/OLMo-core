@@ -563,6 +563,7 @@ def handle_custom_args(
     parser.add_argument("--no-beaker-launch", action="store_true", default=False)
     parser.add_argument("--use-gdn", action="store_true", default=False)
     parser.add_argument("--embedding-norm", action="store_true", default=False)
+    parser.add_argument("--embedding-lr-multiplier", type=float, default=None)
     parser.add_argument(
         "--attn-backend",
         type=AttentionBackendName,
@@ -721,6 +722,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     no_beaker_launch = custom_args.no_beaker_launch
     use_gdn = custom_args.use_gdn
     embedding_norm = custom_args.embedding_norm
+    embedding_lr_multiplier = custom_args.embedding_lr_multiplier
     attn_backend = custom_args.attn_backend
 
     sequence_length = DEFAULT_SEQUENCE_LENGTH
@@ -800,7 +802,17 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
             weight_decay=0.1,
             betas=(0.9, 0.95),
             group_overrides=[
-                OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=0.0))
+                OptimGroupOverride(
+                    params=["embeddings.weight"],
+                    opts=dict(
+                        weight_decay=0.0,
+                        **(
+                            {"lr": adjusted_learning_rate * embedding_lr_multiplier}
+                            if embedding_lr_multiplier is not None
+                            else {}
+                        ),
+                    ),
+                )
             ],
         ),
         scheduler=CosWithWarmupAndLinearDecay(
