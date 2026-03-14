@@ -10,7 +10,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from ..common import ReduceType
+from olmo_core.distributed.utils import get_full_tensor
+
 from .callback import Callback
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ class EmbeddingDiagnosticsCallback(Callback):
     track_unique_tokens: bool = True
     """Log the number of unique token IDs (with at least one occurrence) in the global batch."""
 
+    track_weight_stats: bool = True
+    """Log embedding weight RMS, mean, and stddev (computed over the full, unsharded weight)."""
+
     namespace: str = "embedding_diagnostics"
     """Metric namespace prefix."""
 
@@ -41,6 +45,7 @@ class EmbeddingDiagnosticsCallback(Callback):
     _handles: List[torch.utils.hooks.RemovableHandle] = field(default_factory=list, repr=False)
     _embedding_token_ids: List[torch.Tensor] = field(default_factory=list, repr=False)
     _embedding_vocab_size: Optional[int] = field(default=None, repr=False)
+    _embedding_module: Optional[nn.Embedding] = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Lifecycle hooks
@@ -54,10 +59,12 @@ class EmbeddingDiagnosticsCallback(Callback):
         if model is None or not isinstance(model, nn.Module):
             return
 
-        if self.track_unique_tokens:
-            embeddings = getattr(model, "embeddings", None)
-            if embeddings is not None and isinstance(embeddings, nn.Embedding):
-                self._embedding_vocab_size = embeddings.num_embeddings
+        embeddings = getattr(model, "embeddings", None)
+        if embeddings is not None and isinstance(embeddings, nn.Embedding):
+            self._embedding_vocab_size = embeddings.num_embeddings
+            if self.track_weight_stats:
+                self._embedding_module = embeddings
+            if self.track_unique_tokens:
                 self._handles.append(
                     embeddings.register_forward_hook(self._make_embedding_forward_hook())
                 )
@@ -67,6 +74,7 @@ class EmbeddingDiagnosticsCallback(Callback):
             handle.remove()
         self._handles.clear()
         self._embedding_token_ids.clear()
+        self._embedding_module = None
 
     def post_step(self):
         if not self._should_log():
@@ -75,6 +83,8 @@ class EmbeddingDiagnosticsCallback(Callback):
 
         if self.track_unique_tokens:
             self._log_unique_token_metrics()
+        if self.track_weight_stats:
+            self._log_weight_stats()
 
         self._embedding_token_ids.clear()
 
@@ -150,6 +160,27 @@ class EmbeddingDiagnosticsCallback(Callback):
                     torch.tensor(0.0, device=device),
                     reduce_type=None,
                 )
+
+    def _log_weight_stats(self):
+        """Log RMS, mean, and stddev of the full embedding weight matrix."""
+        if self._embedding_module is None:
+            return
+        w = get_full_tensor(self._embedding_module.weight.detach()).float()
+        self.trainer.record_metric(
+            f"{self.namespace}/weight_rms",
+            w.pow(2).mean().sqrt(),
+            reduce_type=None,
+        )
+        self.trainer.record_metric(
+            f"{self.namespace}/weight_mean",
+            w.mean(),
+            reduce_type=None,
+        )
+        self.trainer.record_metric(
+            f"{self.namespace}/weight_std",
+            w.std(),
+            reduce_type=None,
+        )
 
     # ------------------------------------------------------------------
     # Hooks
