@@ -562,6 +562,7 @@ def handle_custom_args(
     parser.add_argument("--chinchilla-multiple", type=float, default=4.0)  # Default is 4xC
     parser.add_argument("--no-beaker-launch", action="store_true", default=False)
     parser.add_argument("--use-gdn", action="store_true", default=False)
+    parser.add_argument("--embedding-norm", action="store_true", default=False)
     parser.add_argument(
         "--attn-backend",
         type=AttentionBackendName,
@@ -719,6 +720,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     chinchilla_multiple = custom_args.chinchilla_multiple
     no_beaker_launch = custom_args.no_beaker_launch
     use_gdn = custom_args.use_gdn
+    embedding_norm = custom_args.embedding_norm
     attn_backend = custom_args.attn_backend
 
     sequence_length = DEFAULT_SEQUENCE_LENGTH
@@ -735,6 +737,10 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     model_config, model_size_settings = model.get_settings(
         tokenizer_config.padded_vocab_size(), use_gdn=use_gdn, attn_backend=attn_backend
     )
+    if embedding_norm:
+        model_config = model_config.replace(
+            embedding_norm=LayerNormConfig(name=LayerNormType.rms, eps=1e-6, bias=False)
+        )
 
     # Compute hyperparameters
     model_active_params = model_config.num_non_embedding_params
