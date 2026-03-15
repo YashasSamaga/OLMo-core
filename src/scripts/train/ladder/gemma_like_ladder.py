@@ -741,7 +741,7 @@ def build_experiment_config(cli_context: CliContext) -> ExperimentConfig:
     )
     if embedding_norm:
         model_config = model_config.replace(
-            embedding_norm=LayerNormConfig(name=LayerNormType.rms, eps=1e-6, bias=False)
+            embedding_norm=LayerNormConfig(name=LayerNormType.rms, eps=1e-6, elementwise_affine=False, bias=False)
         )
 
     # Compute hyperparameters
