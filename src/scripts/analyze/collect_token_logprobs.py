@@ -2,13 +2,24 @@
 Collect per-token log-prob statistics from a sequence of model checkpoints.
 
 For each checkpoint this script runs a forward pass over a fixed validation
-corpus and saves a structured numpy array with:
+corpus and saves a compressed ``.npz`` file with one structured array per
+data source (e.g. ``c4_en``, ``dolma_wiki``, ``pile``, etc.).  Each array
+contains only non-padding tokens with fields:
 
-    [correct_logit, log_z, correct_prob, top1_prob, mask]
+    [correct_logit, max_logit, log_z,
+     instance_index, token_id, max_token_id, position_in_seq]
 
-per token (all float16 except mask which is int8).
+per token (float16 for logit fields, uint32 for instance_index / token_id /
+max_token_id, uint16 for position_in_seq).  20 bytes per token.
 
-Storage: ~450 MB per checkpoint (50 M tokens).
+The (instance_index, position_in_seq) pair uniquely identifies every
+token across all checkpoint dumps.
+
+Loading a specific source from a checkpoint::
+
+    data = np.load("step001000.npz")
+    c4 = data["c4_en"]          # structured array for c4_en only
+    print(c4["correct_prob"])   # per-token correct-token probabilities
 
 Usage (interactive A100 session, single GPU):
     python src/scripts/analyze/collect_token_logprobs.py \\
@@ -30,23 +41,53 @@ same dataset so outputs are byte-for-byte comparable across checkpoints.
 
 import argparse
 import logging
+from collections import defaultdict
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-import torch.distributed as dist
 
 from olmo_core.data import (
     DataCollator,
     DataMix,
     NumpyFSLDataLoader,
+    NumpyPaddedFSLDataset,
     NumpyPaddedFSLDatasetConfig,
     TokenizerConfig,
 )
 from olmo_core.data.collator import PaddingDirection
+
+
+def build_source_map(dataset: NumpyPaddedFSLDataset) -> Dict[int, str]:
+    """
+    Build a mapping from instance index to source name.
+
+    Returns a dict ``{instance_idx: source_name}`` covering every instance in
+    the dataset.  Source names are derived from the directory structure
+    (e.g. ``.../c4_en/val/part-0-00000.npy`` → ``c4_en``).
+    """
+    # path_idx -> source name
+    source_for_path: Dict[int, str] = {}
+    for path_idx, path_str in enumerate(dataset.paths):
+        parts = Path(path_str).parts
+        source_for_path[path_idx] = parts[-3] if len(parts) >= 3 else Path(path_str).stem
+
+    # instance_idx -> source name  (store range boundaries for fast lookup)
+    instance_to_source: Dict[int, str] = {}
+    for path_idx, (start, end) in enumerate(dataset.offsets):
+        source = source_for_path[path_idx]
+        for idx in range(start, end):
+            instance_to_source[idx] = source
+    return instance_to_source
 from olmo_core.distributed.checkpoint import load_model_and_optim_state
-from olmo_core.distributed.utils import get_fs_local_rank, get_rank, get_world_size
+from olmo_core.distributed.utils import (
+    get_fs_local_rank,
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    init_distributed,
+)
 from olmo_core.nn.attention import AttentionConfig
 from olmo_core.nn.attention.recurrent import GatedDeltaNetConfig
 from olmo_core.nn.transformer import TransformerConfig
@@ -61,10 +102,12 @@ log = logging.getLogger(__name__)
 OUTPUT_DTYPE = np.dtype(
     [
         ("correct_logit", np.float16),
+        ("max_logit", np.float16),
         ("log_z", np.float16),
-        ("correct_prob", np.float16),
-        ("top1_prob", np.float16),
-        ("mask", np.int8),
+        ("instance_index", np.uint32),   # dataset instance (≈ document) index
+        ("token_id", np.uint32),          # correct next token id
+        ("max_token_id", np.uint32),      # model's top prediction token id
+        ("position_in_seq", np.uint16),   # 0-based position within the sequence
     ]
 )
 
@@ -121,8 +164,12 @@ def build_data_loader(
     global_batch_size: int,
     work_dir: str,
     target_tokens: int,
-) -> NumpyFSLDataLoader:
-    """Build a fixed data loader over the dolma_wiki validation split."""
+) -> Tuple[NumpyFSLDataLoader, Dict[int, str]]:
+    """Build a fixed data loader over v3_small_ppl_validation.
+
+    Returns (data_loader, instance_to_source) where instance_to_source maps
+    each dataset instance index to its source name (e.g. 'c4_en').
+    """
     dataset_cfg = NumpyPaddedFSLDatasetConfig.from_data_mix(
         DataMix.v3_small_ppl_validation,
         mix_base_dir=data_root,
@@ -130,7 +177,7 @@ def build_data_loader(
         tokenizer=tokenizer,
         work_dir=work_dir,
     )
-    dataset: NumpyPaddedFSLDataset = dataset_cfg.build()
+    dataset: NumpyPaddedFSLDataset = dataset_cfg.build()  # type: ignore[assignment]
     dataset.prepare()
 
     collator = DataCollator(
@@ -152,14 +199,32 @@ def build_data_loader(
         num_workers=4,
     )
 
-    total_dataset_tokens = len(dataset) * sequence_length
-    if total_dataset_tokens < target_tokens:
+    # Estimate real (non-padding) token count.
+    # NumpyPaddedFSLDataset pads short documents, so len(dataset) * seq_len vastly
+    # overcounts.  Sample a few instances to estimate the actual non-padding fraction.
+    sample_size = min(500, len(dataset))
+    real_token_count = 0
+    for i in range(sample_size):
+        item = dataset[i]
+        if "label_mask" in item:
+            real_token_count += int(item["label_mask"].sum().item())
+        else:
+            real_token_count += len(item["input_ids"])
+    avg_real_per_instance = real_token_count / sample_size
+    estimated_real_tokens = int(avg_real_per_instance * len(dataset))
+
+    log.info(
+        f"Dataset: {len(dataset):,} instances, ~{estimated_real_tokens:,} real tokens "
+        f"(~{100 * avg_real_per_instance / sequence_length:.0f}% non-padding per instance)"
+    )
+    if estimated_real_tokens < target_tokens:
         log.warning(
-            f"Dataset only has {total_dataset_tokens:,} tokens but target is "
+            f"Dataset has only ~{estimated_real_tokens:,} real (non-padding) tokens but target is "
             f"{target_tokens:,}. Will use all available tokens."
         )
 
-    return data_loader
+    instance_to_source = build_source_map(dataset)
+    return data_loader, instance_to_source
 
 
 @torch.no_grad()
@@ -168,21 +233,21 @@ def collect_stats(
     data_loader: NumpyFSLDataLoader,
     target_tokens: int,
     device: torch.device,
+    instance_to_source: Dict[int, str],
     label_ignore_index: int = -100,
-) -> np.ndarray:
+) -> Dict[str, np.ndarray]:
     """
     Run forward passes and accumulate per-token statistics.
 
-    Returns a structured numpy array of shape (N,) with OUTPUT_DTYPE, where N
-    is the number of non-padding tokens (up to target_tokens).
+    Returns a dict mapping source name → structured numpy array of shape (N,)
+    with OUTPUT_DTYPE, containing only non-padding tokens.
     """
     model.eval()
-    buffers: List[np.ndarray] = []
+    source_buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
     total_tokens = 0
 
     for batch in data_loader:
         input_ids = batch["input_ids"].to(device)  # (B, T)
-        labels = batch["input_ids"].to(device)      # labels = input_ids shifted inside model
         # The standard convention: label at position t is input_ids[t+1].
         # NumpyPaddedFSLDataset already packs sequences so we can treat every
         # token except the last one as a prediction target.
@@ -209,28 +274,53 @@ def collect_stats(
         correct_logit = pred_logits.gather(
             -1, target_ids.clamp(min=0).unsqueeze(-1)
         ).squeeze(-1)                                                      # (B, T-1)
-        correct_prob  = (correct_logit - log_z).exp()                     # (B, T-1)
-        top1_prob     = (pred_logits.max(dim=-1).values - log_z).exp()   # (B, T-1)
+        max_logit, max_token_id = pred_logits.max(dim=-1)                 # (B, T-1) each
 
         del pred_logits  # free V-dim tensor immediately
 
-        # Flatten and convert to numpy
-        n = B * (T - 1)
-        rec = np.empty(n, dtype=OUTPUT_DTYPE)
-        rec["correct_logit"] = correct_logit.cpu().half().numpy().ravel()
-        rec["log_z"]         = log_z.cpu().half().numpy().ravel()
-        rec["correct_prob"]  = correct_prob.cpu().half().numpy().ravel()
-        rec["top1_prob"]     = top1_prob.cpu().half().numpy().ravel()
-        rec["mask"]          = mask.cpu().numpy().ravel()
+        # Build per-token identifiers:
+        #   instance_index: (B,) -> broadcast to (B, T-1)
+        #   token_id:       target_ids already (B, T-1)
+        #   position_in_seq: 0..T-2 for each row
+        inst_idx = batch["index"].unsqueeze(1).expand(B, T - 1)   # (B, T-1)
+        pos_in_seq = torch.arange(T - 1, device="cpu").unsqueeze(0).expand(B, T - 1)  # (B, T-1)
 
-        buffers.append(rec)
-        total_tokens += int(mask.sum().item())
+        # Flatten and filter out padding positions.
+        mask_np = mask.cpu().numpy().ravel()  # 1 = real, 0 = padding
+        real_mask = mask_np == 1
+
+        n = int(real_mask.sum())
+        rec = np.empty(n, dtype=OUTPUT_DTYPE)
+        rec["correct_logit"]  = correct_logit.cpu().half().numpy().ravel()[real_mask]
+        rec["max_logit"]      = max_logit.cpu().half().numpy().ravel()[real_mask]
+        rec["log_z"]          = log_z.cpu().half().numpy().ravel()[real_mask]
+        rec["instance_index"] = inst_idx.numpy().ravel().astype(np.uint32)[real_mask]
+        rec["token_id"]       = target_ids.cpu().numpy().ravel().astype(np.uint32)[real_mask]
+        rec["max_token_id"]   = max_token_id.cpu().numpy().ravel().astype(np.uint32)[real_mask]
+        rec["position_in_seq"] = pos_in_seq.numpy().ravel().astype(np.uint16)[real_mask]
+
+        total_tokens += n
+
+        # Group by source using instance_index -> source mapping.
+        inst_indices = rec["instance_index"]
+        # Vectorized lookup: get unique instance indices in this batch.
+        unique_insts = np.unique(inst_indices)
+        for uid in unique_insts:
+            source = instance_to_source.get(int(uid), "unknown")
+            source_buffers[source].append(rec[inst_indices == uid])
 
         if total_tokens >= target_tokens:
             break
 
-    result = np.concatenate(buffers)
-    log.info(f"Collected {total_tokens:,} non-padding tokens ({len(result):,} total positions)")
+    result: Dict[str, np.ndarray] = {}
+    for source, bufs in source_buffers.items():
+        arr = np.concatenate(bufs)
+        # Sort by (instance_index, position_in_seq) to get a canonical token
+        # ordering that is independent of batch size or loader details.
+        sort_key = np.lexsort((arr["position_in_seq"], arr["instance_index"]))
+        result[source] = arr[sort_key]
+    total_per_source = {s: len(a) for s, a in result.items()}
+    log.info(f"Collected {total_tokens:,} non-padding tokens across {len(result)} sources: {total_per_source}")
     return result
 
 
@@ -301,13 +391,16 @@ def main():
     args = parse_args()
 
     # ---------------------------------------------------------------------------
-    # Distributed setup (optional — works fine single-GPU too)
+    # Distributed setup — always initialize (single-GPU gets world_size=1).
+    # load_model_and_optim_state requires an initialized process group.
     # ---------------------------------------------------------------------------
-    is_dist = dist.is_available() and dist.is_initialized()
-    rank = get_rank() if is_dist else 0
-    world_size = get_world_size() if is_dist else 1
+    init_distributed()
+    local_rank = get_local_rank()
+    rank = get_rank()
+    world_size = get_world_size()
 
-    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    torch.cuda.set_device(device)
     seed_all(42)
 
     # ---------------------------------------------------------------------------
@@ -336,7 +429,7 @@ def main():
     # Build data loader (fixed across all checkpoints)
     # ---------------------------------------------------------------------------
     global_batch_size = args.global_batch_size or (8 * args.sequence_length)
-    data_loader = build_data_loader(
+    data_loader, instance_to_source = build_data_loader(
         data_root=args.data_root,
         tokenizer=tokenizer,
         sequence_length=args.sequence_length,
@@ -349,8 +442,8 @@ def main():
     # Main loop
     # ---------------------------------------------------------------------------
     for ckpt_dir in my_checkpoints:
-        tag = checkpoint_tag(ckpt_dir)
-        out_path = output_dir / f"{tag}.npy"
+        tag = args.step_tag if args.step_tag else checkpoint_tag(ckpt_dir)
+        out_path = output_dir / f"{tag}.npz"
 
         if out_path.exists():
             log.info(f"[{tag}] Already exists, skipping.")
@@ -366,19 +459,26 @@ def main():
         )
         log.info(f"[{tag}] Checkpoint loaded. Running forward passes ...")
 
-        data_loader.reshuffle(in_memory=True)
-        data_loader.reset()
+        # Pin epoch=1 so every checkpoint sees the identical data order.
+        data_loader.reshuffle(epoch=1, in_memory=True)
 
         result = collect_stats(
             model=model,
             data_loader=data_loader,
             target_tokens=args.target_tokens,
             device=device,
+            instance_to_source=instance_to_source,
         )
 
-        np.save(out_path, result)
-        log.info(f"[{tag}] Saved {len(result):,} records to {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
+        np.savez_compressed(out_path, **result)
+        total_records = sum(len(a) for a in result.values())
+        log.info(
+            f"[{tag}] Saved {total_records:,} records across {len(result)} sources "
+            f"to {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)"
+        )
 
+        # Reset bookkeeping after iteration (required by DataLoaderBase protocol).
+        data_loader.reset()
         gc_cuda()
 
     log.info("Done.")
