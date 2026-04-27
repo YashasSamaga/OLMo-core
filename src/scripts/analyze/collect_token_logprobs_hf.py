@@ -10,7 +10,7 @@ corpus and saves a compressed ``.npz`` file with one structured array per
 data source (e.g. ``c4_en``, ``dolma_wiki``, ``pile``, etc.).  Each array
 contains only non-padding tokens with fields:
 
-    [correct_logit, max_logit, log_z,
+w    [correct_logit, max_logit, log_z, mean_logit,
      instance_index, token_id, max_token_id, position_in_seq]
 
 per token (float16 for logit fields, uint32 for instance_index / token_id /
@@ -63,6 +63,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 
@@ -94,6 +95,8 @@ OUTPUT_DTYPE = np.dtype(
         ("correct_logit", np.float16),
         ("max_logit", np.float16),
         ("log_z", np.float16),
+        ("mean_logit", np.float16),       # mean logit over vocabulary (clr_correct = correct_logit - mean_logit)
+        ("clr_l2_norm", np.float16),      # L2 norm of CLR vector; divide (logit - mean_logit) by this to get unit-norm CLR
         ("instance_index", np.uint32),   # dataset instance (≈ document) index
         ("token_id", np.uint32),          # correct next token id
         ("max_token_id", np.uint32),      # model's top prediction token id
@@ -205,6 +208,7 @@ def collect_stats(
     label_ignore_index: int = -100,
     top_k: int = 0,
     compute_batch_size: Optional[int] = None,
+    rank: int = 0,
 ) -> Dict[str, np.ndarray]:
     """
     Run forward passes and accumulate per-token statistics.
@@ -222,8 +226,9 @@ def collect_stats(
     source_topk_indices: Dict[str, List[np.ndarray]] = defaultdict(list)
     total_tokens = 0
     t0 = time.monotonic()
+    batch_idx = 0
 
-    pbar = tqdm(desc="Tokens", total=target_tokens, unit="tok", unit_scale=True)
+    pbar = tqdm(desc=f"Rank {rank} tokens", total=target_tokens, unit="tok", unit_scale=True) if rank == 0 else None
 
     for batch in data_loader:
         full_input_ids = batch["input_ids"]  # (B, T) on CPU
@@ -253,6 +258,8 @@ def collect_stats(
                 mask = (target_ids != label_ignore_index).to(torch.int8)
 
             log_z         = torch.logsumexp(pred_logits, dim=-1)
+            mean_logit    = pred_logits.mean(dim=-1)
+            clr_l2_norm   = (pred_logits - mean_logit.unsqueeze(-1)).norm(dim=-1)
             correct_logit = pred_logits.gather(
                 -1, target_ids.clamp(min=0).unsqueeze(-1)
             ).squeeze(-1)
@@ -274,6 +281,8 @@ def collect_stats(
             rec["correct_logit"]  = correct_logit.cpu().half().numpy().ravel()[real_mask]
             rec["max_logit"]      = max_logit.cpu().half().numpy().ravel()[real_mask]
             rec["log_z"]          = log_z.cpu().half().numpy().ravel()[real_mask]
+            rec["mean_logit"]     = mean_logit.cpu().half().numpy().ravel()[real_mask]
+            rec["clr_l2_norm"]    = clr_l2_norm.cpu().half().numpy().ravel()[real_mask]
             rec["instance_index"] = inst_idx.numpy().ravel().astype(np.uint32)[real_mask]
             rec["token_id"]       = target_ids.cpu().numpy().ravel().astype(np.uint32)[real_mask]
             rec["max_token_id"]   = max_token_id.cpu().numpy().ravel().astype(np.uint32)[real_mask]
@@ -291,7 +300,12 @@ def collect_stats(
 
         n = len(rec)
         total_tokens += n
-        pbar.update(n)
+        batch_idx += 1
+        if pbar is not None:
+            pbar.update(n)
+        elif batch_idx % 10 == 0:
+            elapsed = time.monotonic() - t0
+            log.info(f"[rank {rank}] {total_tokens:,} / {target_tokens:,} tokens ({elapsed:.0f}s)")
 
         inst_indices = rec["instance_index"]
         unique_insts = np.unique(inst_indices)
@@ -491,6 +505,7 @@ def main():
             instance_to_source=instance_to_source,
             top_k=args.top_k,
             compute_batch_size=compute_batch_seqs,
+            rank=rank,
         )
 
         tmp_path = out_path.with_suffix(".tmp.npz")
@@ -510,6 +525,10 @@ def main():
         data_loader.reset()
         gc_cuda()
 
+    # Wait for all ranks to finish before exiting so torchrun doesn't tear down
+    # the process group when a rank with fewer revisions exits early.
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier(device_ids=[local_rank])
     log.info("Done.")
 
 
