@@ -1,7 +1,11 @@
 """
-Collect per-token log-prob statistics from a sequence of model checkpoints.
+Collect per-token log-prob statistics from HuggingFace model checkpoints.
 
-For each checkpoint this script runs a forward pass over a fixed validation
+This is the HF-native variant of ``collect_token_logprobs.py``.  Instead of
+loading OLMo-core-format checkpoints, it pulls weights directly from
+HuggingFace Hub revisions (branches) using ``AutoModelForCausalLM``.
+
+For each revision this script runs a forward pass over a fixed validation
 corpus and saves a compressed ``.npz`` file with one structured array per
 data source (e.g. ``c4_en``, ``dolma_wiki``, ``pile``, etc.).  Each array
 contains only non-padding tokens with fields:
@@ -18,42 +22,49 @@ source: ``{source}__topk_logits`` of shape ``(N, K)`` (float16) and
 logits and token IDs of the K highest-scoring tokens at each position.
 
 The (instance_index, position_in_seq) pair uniquely identifies every
-token across all checkpoint dumps.
+token across all checkpoint dumps, making outputs directly comparable
+to those from ``collect_token_logprobs.py``.
 
 Loading a specific source from a checkpoint::
 
-    data = np.load("step001000.npz")
-    c4 = data["c4_en"]          # structured array for c4_en only
-    print(c4["correct_prob"])   # per-token correct-token probabilities
+    data = np.load("stage1-step10000-tokens21B.npz")
+    c4 = data["c4_en"]
+    log_prob = c4["correct_logit"] - c4["log_z"]
+    topk_logits = data["c4_en__topk_logits"]    # (N, K) float16, if --top-k was used
+    topk_indices = data["c4_en__topk_indices"]  # (N, K) uint32
 
-Usage (interactive A100 session, single GPU):
-    python src/scripts/analyze/collect_token_logprobs.py \\
-        --checkpoint-dirs gs://ai2-llm/checkpoints/shanea/OLMo-medium/peteish7/step{1000..928000..1000} \\
-        --output-dir /weka/oe-training-default/ai2-llm/checkpoints/trajectory-logprobs/peteish7 \\
-        --model olmo2_7B \\
+Usage (single GPU)::
+
+    python src/scripts/analyze/collect_token_logprobs_hf.py \\
+        --model allenai/OLMo-2-0425-1B \\
+        --revisions stage1-step{0..990000..10000} \\
+        --output-dir /weka/oe-training-default/ai2-llm/checkpoints/trajectory-logprobs/olmo2-1b \\
         --target-tokens 50_000_000
 
-Usage (multi-GPU to shard checkpoints across GPUs):
-    torchrun --nproc-per-node=8 src/scripts/analyze/collect_token_logprobs.py \\
-        --checkpoint-dirs <dirs> \\
+Usage (multi-GPU, one revision per GPU)::
+
+    torchrun --nproc-per-node=8 src/scripts/analyze/collect_token_logprobs_hf.py \\
+        --model allenai/OLMo-2-0425-1B \\
+        --revisions stage1-step{0..990000..10000} \\
         --output-dir <dir> \\
-        --model olmo2_7B \\
         --target-tokens 50_000_000
 
-Each GPU processes a disjoint slice of the checkpoint list.  All GPUs use the
-same dataset so outputs are byte-for-byte comparable across checkpoints.
+Each GPU processes a disjoint slice of the revision list.  All GPUs use the
+same dataset so outputs are byte-for-byte comparable across revisions.
 """
 
 import argparse
+import gc
 import logging
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM
 
 from olmo_core.data import (
     DataCollator,
@@ -64,30 +75,6 @@ from olmo_core.data import (
     TokenizerConfig,
 )
 from olmo_core.data.collator import PaddingDirection
-
-
-def build_source_map(dataset: NumpyPaddedFSLDataset) -> Dict[int, str]:
-    """
-    Build a mapping from instance index to source name.
-
-    Returns a dict ``{instance_idx: source_name}`` covering every instance in
-    the dataset.  Source names are derived from the directory structure
-    (e.g. ``.../c4_en/val/part-0-00000.npy`` → ``c4_en``).
-    """
-    # path_idx -> source name
-    source_for_path: Dict[int, str] = {}
-    for path_idx, path_str in enumerate(dataset.paths):
-        parts = Path(path_str).parts
-        source_for_path[path_idx] = parts[-3] if len(parts) >= 3 else Path(path_str).stem
-
-    # instance_idx -> source name  (store range boundaries for fast lookup)
-    instance_to_source: Dict[int, str] = {}
-    for path_idx, (start, end) in enumerate(dataset.offsets):
-        source = source_for_path[path_idx]
-        for idx in range(start, end):
-            instance_to_source[idx] = source
-    return instance_to_source
-from olmo_core.distributed.checkpoint import load_model_and_optim_state
 from olmo_core.distributed.utils import (
     get_fs_local_rank,
     get_local_rank,
@@ -95,16 +82,12 @@ from olmo_core.distributed.utils import (
     get_world_size,
     init_distributed,
 )
-from olmo_core.nn.attention import AttentionConfig
-from olmo_core.nn.attention.recurrent import GatedDeltaNetConfig
-from olmo_core.nn.transformer import TransformerConfig
-from olmo_core.nn.transformer.config import TransformerBlockConfig
 from olmo_core.utils import gc_cuda, prepare_cli_environment, seed_all
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Output dtype
+# Output dtype — identical to collect_token_logprobs.py for compatibility
 # ---------------------------------------------------------------------------
 OUTPUT_DTYPE = np.dtype(
     [
@@ -119,49 +102,30 @@ OUTPUT_DTYPE = np.dtype(
 )
 
 # ---------------------------------------------------------------------------
-# Supported model configs
-# ---------------------------------------------------------------------------
-
-_HYBRID_7B_REMOVE_HEADS = 2
-
-
-def _olmo_hybrid_7B(vocab_size: int, **kwargs) -> TransformerConfig:
-    """OLMo 3.2 7B hybrid: 3 GDN layers + 1 attention layer, repeating."""
-    config = TransformerConfig.olmo3_7B(vocab_size=vocab_size, **kwargs)
-    assert isinstance(config.block, TransformerBlockConfig)
-    assert isinstance(config.block.sequence_mixer, AttentionConfig)
-
-    config.d_model -= _HYBRID_7B_REMOVE_HEADS * 128
-    num_heads = config.block.sequence_mixer.n_heads - _HYBRID_7B_REMOVE_HEADS
-    config.block.sequence_mixer.n_heads = num_heads
-
-    attn_block = config.block
-    gdn_block = attn_block.replace(
-        sequence_mixer=GatedDeltaNetConfig(
-            n_heads=num_heads,
-            head_dim=int(0.75 * config.d_model / num_heads),
-            allow_neg_eigval=True,
-        ),
-    )
-    config.block = {"gdn": gdn_block, "attn": attn_block}
-    config.block_pattern = ["gdn", "gdn", "gdn", "attn"]
-    return config
-
-
-MODEL_CONFIGS = {
-    "olmo2_1B": TransformerConfig.olmo2_1B_v2,
-    "olmo2_7B": TransformerConfig.olmo2_7B,
-    "olmo2_13B": TransformerConfig.olmo2_13B,
-    "olmo2_32B": TransformerConfig.olmo2_32B,
-    "olmo3_7B": TransformerConfig.olmo3_7B,
-    "olmo3_32B": TransformerConfig.olmo3_32B,
-    "olmo_hybrid_7B": _olmo_hybrid_7B,
-}
-
-# ---------------------------------------------------------------------------
 # Data root — Weka if available, otherwise GCS public endpoint
 # ---------------------------------------------------------------------------
 DEFAULT_DATA_ROOT = "/weka/oe-training-default/ai2-llm"
+
+
+def build_source_map(dataset: NumpyPaddedFSLDataset) -> Dict[int, str]:
+    """
+    Build a mapping from instance index to source name.
+
+    Returns a dict ``{instance_idx: source_name}`` covering every instance in
+    the dataset.  Source names are derived from the directory structure
+    (e.g. ``.../c4_en/val/part-0-00000.npy`` → ``c4_en``).
+    """
+    source_for_path: Dict[int, str] = {}
+    for path_idx, path_str in enumerate(dataset.paths):
+        parts = Path(path_str).parts
+        source_for_path[path_idx] = parts[-3] if len(parts) >= 3 else Path(path_str).stem
+
+    instance_to_source: Dict[int, str] = {}
+    for path_idx, (start, end) in enumerate(dataset.offsets):
+        source = source_for_path[path_idx]
+        for idx in range(start, end):
+            instance_to_source[idx] = source
+    return instance_to_source
 
 
 def build_data_loader(
@@ -206,9 +170,6 @@ def build_data_loader(
         num_workers=4,
     )
 
-    # Estimate real (non-padding) token count.
-    # NumpyPaddedFSLDataset pads short documents, so len(dataset) * seq_len vastly
-    # overcounts.  Sample a few instances to estimate the actual non-padding fraction.
     sample_size = min(500, len(dataset))
     real_token_count = 0
     for i in range(sample_size):
@@ -243,6 +204,7 @@ def collect_stats(
     instance_to_source: Dict[int, str],
     label_ignore_index: int = -100,
     top_k: int = 0,
+    compute_batch_size: Optional[int] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Run forward passes and accumulate per-token statistics.
@@ -264,71 +226,74 @@ def collect_stats(
     pbar = tqdm(desc="Tokens", total=target_tokens, unit="tok", unit_scale=True)
 
     for batch in data_loader:
-        input_ids = batch["input_ids"].to(device)  # (B, T)
-        # The standard convention: label at position t is input_ids[t+1].
-        # NumpyPaddedFSLDataset already packs sequences so we can treat every
-        # token except the last one as a prediction target.
-        B, T = input_ids.shape
+        full_input_ids = batch["input_ids"]  # (B, T) on CPU
+        full_indices = batch["index"]        # (B,) on CPU
+        full_label_mask = batch.get("label_mask")  # (B, T) or None
+        B, T = full_input_ids.shape
 
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            logits = model(input_ids)  # (B, T, V)
+        step = compute_batch_size or B
+        assert B % step == 0, f"data batch size {B} must be divisible by compute_batch_size {step}"
+        sub_recs: List[np.ndarray] = []
+        sub_topk_logits: List[np.ndarray] = []
+        sub_topk_ids: List[np.ndarray] = []
 
-        logits = logits.float()  # upcast before numerical ops
+        for sb_start in range(0, B, step):
+            input_ids = full_input_ids[sb_start:sb_start + step].to(device)
+            sb_indices = full_indices[sb_start:sb_start + step]
 
-        # Prediction: token t predicts token t+1
-        pred_logits = logits[:, :-1, :]       # (B, T-1, V)
-        target_ids  = input_ids[:, 1:]        # (B, T-1)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                outputs = model(input_ids, use_cache=False)
+                pred_logits = outputs.logits[:, :-1, :].float()  # (step, T-1, V)  fp32
 
-        # Build mask: 1 where target is a real token, 0 at padding
-        # label_mask may be present in the batch; fall back to all-ones
-        if "label_mask" in batch:
-            mask = batch["label_mask"][:, 1:].to(device).to(torch.int8)  # (B, T-1)
-        else:
-            mask = (target_ids != label_ignore_index).to(torch.int8)     # (B, T-1)
+            target_ids = input_ids[:, 1:]  # (step, T-1)
 
-        # Compute per-token stats — gather before logsumexp to keep peak memory low
-        log_z         = torch.logsumexp(pred_logits, dim=-1)              # (B, T-1)
-        correct_logit = pred_logits.gather(
-            -1, target_ids.clamp(min=0).unsqueeze(-1)
-        ).squeeze(-1)                                                      # (B, T-1)
-        max_logit, max_token_id = pred_logits.max(dim=-1)                 # (B, T-1) each
+            if full_label_mask is not None:
+                mask = full_label_mask[sb_start:sb_start + step, 1:].to(device).to(torch.int8)
+            else:
+                mask = (target_ids != label_ignore_index).to(torch.int8)
 
+            log_z         = torch.logsumexp(pred_logits, dim=-1)
+            correct_logit = pred_logits.gather(
+                -1, target_ids.clamp(min=0).unsqueeze(-1)
+            ).squeeze(-1)
+            max_logit, max_token_id = pred_logits.max(dim=-1)
+
+            if top_k > 0:
+                topk_vals, topk_ids = torch.topk(pred_logits, top_k, dim=-1)  # (step, T-1, K)
+
+            del pred_logits
+
+            inst_idx = sb_indices.unsqueeze(1).expand(step, T - 1)
+            pos_in_seq = torch.arange(T - 1, device="cpu").unsqueeze(0).expand(step, T - 1)
+
+            mask_np = mask.cpu().numpy().ravel()
+            real_mask = mask_np == 1
+
+            n_sub = int(real_mask.sum())
+            rec = np.empty(n_sub, dtype=OUTPUT_DTYPE)
+            rec["correct_logit"]  = correct_logit.cpu().half().numpy().ravel()[real_mask]
+            rec["max_logit"]      = max_logit.cpu().half().numpy().ravel()[real_mask]
+            rec["log_z"]          = log_z.cpu().half().numpy().ravel()[real_mask]
+            rec["instance_index"] = inst_idx.numpy().ravel().astype(np.uint32)[real_mask]
+            rec["token_id"]       = target_ids.cpu().numpy().ravel().astype(np.uint32)[real_mask]
+            rec["max_token_id"]   = max_token_id.cpu().numpy().ravel().astype(np.uint32)[real_mask]
+            rec["position_in_seq"] = pos_in_seq.numpy().ravel().astype(np.uint16)[real_mask]
+            sub_recs.append(rec)
+
+            if top_k > 0:
+                sub_topk_logits.append(topk_vals.cpu().half().numpy().reshape(-1, top_k)[real_mask])
+                sub_topk_ids.append(topk_ids.cpu().numpy().reshape(-1, top_k).astype(np.uint32)[real_mask])
+
+        rec = np.concatenate(sub_recs)
         if top_k > 0:
-            topk_vals, topk_ids = torch.topk(pred_logits, top_k, dim=-1)  # (B, T-1, K)
+            topk_logits_np = np.concatenate(sub_topk_logits)
+            topk_ids_np = np.concatenate(sub_topk_ids)
 
-        del pred_logits  # free V-dim tensor immediately
-
-        # Build per-token identifiers:
-        #   instance_index: (B,) -> broadcast to (B, T-1)
-        #   token_id:       target_ids already (B, T-1)
-        #   position_in_seq: 0..T-2 for each row
-        inst_idx = batch["index"].unsqueeze(1).expand(B, T - 1)   # (B, T-1)
-        pos_in_seq = torch.arange(T - 1, device="cpu").unsqueeze(0).expand(B, T - 1)  # (B, T-1)
-
-        # Flatten and filter out padding positions.
-        mask_np = mask.cpu().numpy().ravel()  # 1 = real, 0 = padding
-        real_mask = mask_np == 1
-
-        n = int(real_mask.sum())
-        rec = np.empty(n, dtype=OUTPUT_DTYPE)
-        rec["correct_logit"]  = correct_logit.cpu().half().numpy().ravel()[real_mask]
-        rec["max_logit"]      = max_logit.cpu().half().numpy().ravel()[real_mask]
-        rec["log_z"]          = log_z.cpu().half().numpy().ravel()[real_mask]
-        rec["instance_index"] = inst_idx.numpy().ravel().astype(np.uint32)[real_mask]
-        rec["token_id"]       = target_ids.cpu().numpy().ravel().astype(np.uint32)[real_mask]
-        rec["max_token_id"]   = max_token_id.cpu().numpy().ravel().astype(np.uint32)[real_mask]
-        rec["position_in_seq"] = pos_in_seq.numpy().ravel().astype(np.uint16)[real_mask]
-
-        if top_k > 0:
-            topk_logits_np = topk_vals.cpu().half().numpy().reshape(-1, top_k)[real_mask]
-            topk_ids_np = topk_ids.cpu().numpy().reshape(-1, top_k).astype(np.uint32)[real_mask]
-
+        n = len(rec)
         total_tokens += n
         pbar.update(n)
 
-        # Group by source using instance_index -> source mapping.
         inst_indices = rec["instance_index"]
-        # Vectorized lookup: get unique instance indices in this batch.
         unique_insts = np.unique(inst_indices)
         for uid in unique_insts:
             source = instance_to_source.get(int(uid), "unknown")
@@ -349,8 +314,6 @@ def collect_stats(
     result: Dict[str, np.ndarray] = {}
     for source, bufs in source_buffers.items():
         arr = np.concatenate(bufs)
-        # Sort by (instance_index, position_in_seq) to get a canonical token
-        # ordering that is independent of batch size or loader details.
         sort_key = np.lexsort((arr["position_in_seq"], arr["instance_index"]))
         result[source] = arr[sort_key]
         if top_k > 0:
@@ -366,30 +329,31 @@ def collect_stats(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
-        "--checkpoint-dirs",
+        "--model",
+        required=True,
+        help="HuggingFace model ID (e.g. 'allenai/OLMo-2-0425-1B').",
+    )
+    parser.add_argument(
+        "--revisions",
         nargs="+",
         required=True,
-        help="List of checkpoint directories (local or gs:// / weka paths). "
-             "Each must point to a directory containing model_and_optim/.",
+        help="List of HF revisions (branches) to evaluate. "
+             "Use bash brace expansion, e.g. stage1-step{0..990000..10000}.",
     )
     parser.add_argument(
         "--output-dir",
         required=True,
-        help="Directory to write per-checkpoint .npy files into.",
-    )
-    parser.add_argument(
-        "--model",
-        choices=list(MODEL_CONFIGS.keys()),
-        required=True,
-        help="Model architecture.",
+        help="Directory to write per-revision .npz files into.",
     )
     parser.add_argument(
         "--target-tokens",
         type=int,
         default=50_000_000,
-        help="Number of non-padding tokens to collect per checkpoint (default: 50M).",
+        help="Number of non-padding tokens to collect per revision (default: 50M).",
     )
     parser.add_argument(
         "--sequence-length",
@@ -409,7 +373,15 @@ def parse_args() -> argparse.Namespace:
         "--global-batch-size",
         type=int,
         default=None,
-        help="Global batch size in tokens. Defaults to 8 * sequence_length.",
+        help="Global batch size in tokens (controls dataset truncation). Defaults to 16 * sequence_length.",
+    )
+    parser.add_argument(
+        "--compute-batch-size",
+        type=int,
+        default=None,
+        help="Number of sequences per forward pass. Defaults to global_batch_size // sequence_length. "
+             "Set this lower than --global-batch-size to reduce GPU memory usage without changing "
+             "which tokens are collected.",
     )
     parser.add_argument(
         "--data-root",
@@ -421,18 +393,7 @@ def parse_args() -> argparse.Namespace:
         default="/tmp/collect_token_logprobs",
         help="Local working directory for dataset preprocessing cache.",
     )
-    parser.add_argument(
-        "--step-tag",
-        default=None,
-        help="Optional tag to embed in output filenames alongside the checkpoint path hash. "
-             "If omitted, the last path component is used (e.g. 'step001000').",
-    )
     return parser.parse_args()
-
-
-def checkpoint_tag(ckpt_dir: str) -> str:
-    """Extract a short tag from a checkpoint path, e.g. 'step001000'."""
-    return Path(ckpt_dir.rstrip("/")).name
 
 
 def main():
@@ -440,8 +401,7 @@ def main():
     args = parse_args()
 
     # ---------------------------------------------------------------------------
-    # Distributed setup — always initialize (single-GPU gets world_size=1).
-    # load_model_and_optim_state requires an initialized process group.
+    # Distributed setup
     # ---------------------------------------------------------------------------
     init_distributed()
     local_rank = get_local_rank()
@@ -450,34 +410,37 @@ def main():
 
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
+    torch.set_float32_matmul_precision("high")
     seed_all(42)
 
     # ---------------------------------------------------------------------------
-    # Shard checkpoint list across ranks (each rank processes a disjoint slice)
+    # Shard revision list across ranks
     # ---------------------------------------------------------------------------
-    all_checkpoints = args.checkpoint_dirs
-    my_checkpoints = all_checkpoints[rank::world_size]
-    log.info(f"Rank {rank}/{world_size}: processing {len(my_checkpoints)}/{len(all_checkpoints)} checkpoints")
+    all_revisions = args.revisions
+    my_revisions = all_revisions[rank::world_size]
+    log.info(
+        f"Rank {rank}/{world_size}: processing {len(my_revisions)}/{len(all_revisions)} revisions"
+    )
 
     # ---------------------------------------------------------------------------
-    # Output directory
+    # Output directory — nest under model ID (e.g. allenai_OLMo-2-0425-1B/)
     # ---------------------------------------------------------------------------
-    output_dir = Path(args.output_dir)
+    safe_model = args.model.replace("/", "_")
+    output_dir = Path(args.output_dir) / safe_model
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------------------------------------------------------------------------
-    # Build model (once — weights are reloaded per checkpoint)
+    # Build data loader (fixed across all revisions)
     # ---------------------------------------------------------------------------
     tokenizer = TokenizerConfig.dolma2()
-    model_cfg_fn = MODEL_CONFIGS[args.model]
-    model_cfg = model_cfg_fn(vocab_size=tokenizer.padded_vocab_size())
-    model = model_cfg.build(init_device=str(device))
-    model = model.to(dtype=torch.bfloat16)
-
-    # ---------------------------------------------------------------------------
-    # Build data loader (fixed across all checkpoints)
-    # ---------------------------------------------------------------------------
-    global_batch_size = args.global_batch_size or (8 * args.sequence_length)
+    global_batch_size = args.global_batch_size or (16 * args.sequence_length)
+    compute_batch_seqs = args.compute_batch_size  # None means use full loader batch
+    if compute_batch_seqs is not None:
+        data_batch_seqs = global_batch_size // args.sequence_length
+        assert data_batch_seqs % compute_batch_seqs == 0, (
+            f"--compute-batch-size {compute_batch_seqs} must divide "
+            f"--global-batch-size // --sequence-length = {data_batch_seqs}"
+        )
     data_loader, instance_to_source = build_data_loader(
         data_root=args.data_root,
         tokenizer=tokenizer,
@@ -488,28 +451,36 @@ def main():
     )
 
     # ---------------------------------------------------------------------------
-    # Main loop
+    # Main loop — load a fresh model per revision from HF Hub
     # ---------------------------------------------------------------------------
-    for ckpt_i, ckpt_dir in enumerate(my_checkpoints, 1):
-        tag = args.step_tag if args.step_tag else checkpoint_tag(ckpt_dir)
-        out_path = output_dir / f"{tag}.npz"
+    for rev_i, revision in enumerate(my_revisions, 1):
+        safe_name = revision.replace("/", "_")
+        out_path = output_dir / f"{safe_name}.npz"
 
         if out_path.exists():
-            log.info(f"[{ckpt_i}/{len(my_checkpoints)}] [{tag}] Already exists, skipping.")
+            log.info(f"[{rev_i}/{len(my_revisions)}] [{revision}] Already exists, skipping.")
             continue
 
-        ckpt_t0 = time.monotonic()
-        log.info(f"[{ckpt_i}/{len(my_checkpoints)}] [{tag}] Loading checkpoint from {ckpt_dir} ...")
-        ckpt_model_path = ckpt_dir.rstrip("/") + "/model_and_optim"
-        load_model_and_optim_state(
-            ckpt_model_path,
-            model,
-            optim=None,
-            strict=True,
-        )
-        log.info(f"[{ckpt_i}/{len(my_checkpoints)}] [{tag}] Checkpoint loaded. Running forward passes ...")
+        rev_t0 = time.monotonic()
+        log.info(f"[{rev_i}/{len(my_revisions)}] [{revision}] Loading {args.model} from HF Hub ...")
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            revision=revision,
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+        ).to(device)
+        # Sanity-check: model vocab must be compatible with the dolma2 tokenizer.
+        model_vocab = model.config.vocab_size
+        base_vocab = tokenizer.vocab_size
+        if model_vocab < base_vocab:
+            raise ValueError(
+                f"Model vocab_size={model_vocab} is smaller than dolma2 "
+                f"vocab_size={base_vocab}. The pre-tokenized eval data "
+                f"is only valid for dolma2-tokenizer models."
+            )
+        model = torch.compile(model)
+        log.info(f"[{rev_i}/{len(my_revisions)}] [{revision}] Model loaded and compiled. Running forward passes ...")
 
-        # Pin epoch=1 so every checkpoint sees the identical data order.
         data_loader.reshuffle(epoch=1, in_memory=True)
 
         result = collect_stats(
@@ -519,18 +490,23 @@ def main():
             device=device,
             instance_to_source=instance_to_source,
             top_k=args.top_k,
+            compute_batch_size=compute_batch_seqs,
         )
 
-        np.savez_compressed(out_path, **result)
+        tmp_path = out_path.with_suffix(".tmp.npz")
+        np.savez_compressed(tmp_path, **result)
+        tmp_path.rename(out_path)
         total_records = sum(len(a) for k, a in result.items() if "__topk" not in k)
-        ckpt_elapsed = time.monotonic() - ckpt_t0
+        rev_elapsed = time.monotonic() - rev_t0
         log.info(
-            f"[{ckpt_i}/{len(my_checkpoints)}] [{tag}] Saved {total_records:,} records across "
+            f"[{rev_i}/{len(my_revisions)}] [{revision}] Saved {total_records:,} records across "
             f"{len(result)} sources to {out_path} ({out_path.stat().st_size / 1e6:.1f} MB, "
-            f"{ckpt_elapsed:.1f}s total)"
+            f"{rev_elapsed:.1f}s total)"
         )
 
-        # Reset bookkeeping after iteration (required by DataLoaderBase protocol).
+        # Free the model before loading the next revision.
+        del model
+        gc.collect()
         data_loader.reset()
         gc_cuda()
 

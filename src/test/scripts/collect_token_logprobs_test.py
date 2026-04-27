@@ -418,6 +418,53 @@ def test_npz_round_trip_per_source(tmp_path: Path):
     np.testing.assert_array_equal(loaded["source_b"]["instance_index"], [1, 1])
     np.testing.assert_array_equal(loaded["source_b"]["position_in_seq"], [0, 1])
 
+
+def test_npz_round_trip_with_topk(tmp_path: Path):
+    """
+    Verify that top-K logit/index arrays round-trip through .npz alongside
+    the per-source structured arrays.
+    """
+    K = 5
+    source_a = _make_fake_records([0, 0, 0], [0, 1, 2])
+    source_b = _make_fake_records([1, 1], [0, 1])
+
+    topk_logits_a = np.random.rand(3, K).astype(np.float16)
+    topk_indices_a = np.arange(3 * K, dtype=np.uint32).reshape(3, K)
+    topk_logits_b = np.random.rand(2, K).astype(np.float16)
+    topk_indices_b = np.arange(2 * K, dtype=np.uint32).reshape(2, K)
+
+    out_path = tmp_path / "test_topk.npz"
+    np.savez_compressed(
+        out_path,
+        source_a=source_a,
+        source_a__topk_logits=topk_logits_a,
+        source_a__topk_indices=topk_indices_a,
+        source_b=source_b,
+        source_b__topk_logits=topk_logits_b,
+        source_b__topk_indices=topk_indices_b,
+    )
+
+    loaded = np.load(out_path, allow_pickle=False)
+    expected_keys = {
+        "source_a", "source_a__topk_logits", "source_a__topk_indices",
+        "source_b", "source_b__topk_logits", "source_b__topk_indices",
+    }
+    assert set(loaded.files) == expected_keys
+
+    # Structured arrays unchanged
+    np.testing.assert_array_equal(loaded["source_a"]["instance_index"], [0, 0, 0])
+    np.testing.assert_array_equal(loaded["source_b"]["position_in_seq"], [0, 1])
+
+    # Top-K arrays preserved
+    assert loaded["source_a__topk_logits"].shape == (3, K)
+    assert loaded["source_a__topk_indices"].shape == (3, K)
+    assert loaded["source_b__topk_logits"].shape == (2, K)
+    assert loaded["source_b__topk_indices"].shape == (2, K)
+    np.testing.assert_array_equal(loaded["source_a__topk_logits"], topk_logits_a)
+    np.testing.assert_array_equal(loaded["source_a__topk_indices"], topk_indices_a)
+    np.testing.assert_array_equal(loaded["source_b__topk_logits"], topk_logits_b)
+    np.testing.assert_array_equal(loaded["source_b__topk_indices"], topk_indices_b)
+
     # Logit values must survive the round-trip.
     np.testing.assert_array_equal(
         loaded["source_a"]["correct_logit"], source_a["correct_logit"]
