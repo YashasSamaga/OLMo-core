@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="allenai/OLMo-2-0425-1B"
+# MODEL="allenai/OLMo-2-0425-1B"
+MODEL="allenai/OLMo-2-1124-7B"
 # MODEL="allenai/Olmo-3-1025-7B"
+
 OUTPUT_DIR="/weka/oe-training-default/yashasbls/georges-functional-analysis"
 TARGET_TOKENS=6000000
 NUM_GPUS=8
 # global_batch_size controls which instances are dropped (always 16 seqs = 65536 tokens).
 # compute_batch_size controls GPU memory — reduce for 7B/32B if you OOM.
 GLOBAL_BATCH_SIZE=65536   # 16 * 4096: fixed for consistent truncation across all models
-COMPUTE_BATCH_SIZE=16      # sequences per forward pass (reduce for larger models)
+COMPUTE_BATCH_SIZE=8      # sequences per forward pass (reduce for larger models)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 

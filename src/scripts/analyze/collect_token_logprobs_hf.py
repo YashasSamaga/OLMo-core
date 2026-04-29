@@ -64,7 +64,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.distributed as dist
-from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 
 from olmo_core.data import (
@@ -228,8 +227,6 @@ def collect_stats(
     t0 = time.monotonic()
     batch_idx = 0
 
-    pbar = tqdm(desc=f"Rank {rank} tokens", total=target_tokens, unit="tok", unit_scale=True) if rank == 0 else None
-
     for batch in data_loader:
         full_input_ids = batch["input_ids"]  # (B, T) on CPU
         full_indices = batch["index"]        # (B,) on CPU
@@ -301,9 +298,7 @@ def collect_stats(
         n = len(rec)
         total_tokens += n
         batch_idx += 1
-        if pbar is not None:
-            pbar.update(n)
-        elif batch_idx % 10 == 0:
+        if batch_idx % 10 == 0:
             elapsed = time.monotonic() - t0
             log.info(f"[rank {rank}] {total_tokens:,} / {target_tokens:,} tokens ({elapsed:.0f}s)")
 
@@ -320,7 +315,6 @@ def collect_stats(
         if total_tokens >= target_tokens:
             break
 
-    pbar.close()
     elapsed = time.monotonic() - t0
     tok_per_sec = total_tokens / elapsed if elapsed > 0 else float("inf")
     log.info(f"Forward passes: {elapsed:.1f}s, {tok_per_sec:,.0f} tok/s")
