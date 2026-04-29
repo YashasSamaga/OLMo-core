@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # MODEL="allenai/OLMo-2-0425-1B"
-MODEL="allenai/OLMo-2-1124-7B"
-# MODEL="allenai/Olmo-3-1025-7B"
+# MODEL="allenai/OLMo-2-1124-7B"
+MODEL="allenai/Olmo-3-1025-7B"
 
 OUTPUT_DIR="/weka/oe-training-default/yashasbls/georges-functional-analysis"
 TARGET_TOKENS=6000000
