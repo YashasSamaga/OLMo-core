@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # MODEL="allenai/OLMo-2-0425-1B"
 # MODEL="allenai/OLMo-2-1124-7B"
-MODEL="allenai/Olmo-3-1025-7B"
+# MODEL="allenai/Olmo-3-1025-7B"
+# MODEL="allenai/OLMoE-1B-7B-0924"
+# MODEL="allenai/Olmo-Hybrid-7B"
+# MODEL="allenai/OLMo-2-1124-13B"
+MODEL="allenai/Olmo-3-1125-32B"
+# MODEL="allenai/OLMo-2-0325-32B"
 
 OUTPUT_DIR="/weka/oe-training-default/yashasbls/georges-functional-analysis"
 TARGET_TOKENS=6000000
@@ -53,13 +58,17 @@ echo "Found ${NUM_REVISIONS} stage1 revisions for ${MODEL}"
 
 cd "$REPO_ROOT"
 
-uv run torchrun --nproc-per-node="$NUM_GPUS" \
-    src/scripts/analyze/collect_token_logprobs_hf.py \
-    --work-dir /weka/oe-training-default/yashasbls/georges-functional-analysis/.dataset_cache \
-    --model "$MODEL" \
-    --revisions $REVISIONS \
-    --output-dir "$OUTPUT_DIR" \
-    --target-tokens "$TARGET_TOKENS" \
-    --global-batch-size "$GLOBAL_BATCH_SIZE" \
-    --compute-batch-size "$COMPUTE_BATCH_SIZE" \
-    --top-k 32
+while true; do
+    uv run torchrun --nproc-per-node="$NUM_GPUS" \
+        src/scripts/analyze/collect_token_logprobs_hf.py \
+        --work-dir /weka/oe-training-default/yashasbls/georges-functional-analysis/.dataset_cache \
+        --model "$MODEL" \
+        --revisions $REVISIONS \
+        --output-dir "$OUTPUT_DIR" \
+        --target-tokens "$TARGET_TOKENS" \
+        --global-batch-size "$GLOBAL_BATCH_SIZE" \
+        --compute-batch-size "$COMPUTE_BATCH_SIZE" \
+        --top-k 32 && break
+    echo "Command exited with code $?. Restarting in 5 seconds..."
+    sleep 5
+done
