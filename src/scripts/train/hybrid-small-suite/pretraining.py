@@ -90,7 +90,7 @@ from olmo_core.train.train_module import (
     TransformerTrainModuleConfig,
 )
 
-CHINCHILLA_MULTIPLE = 2
+CHINCHILLA_MULTIPLE = 4
 DATA_MIX = DataMix.OLMo_mix_0925
 
 # Per-size learning rates.
