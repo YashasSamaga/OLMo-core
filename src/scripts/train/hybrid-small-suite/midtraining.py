@@ -92,7 +92,7 @@ SEED = 1337
 INSTANCE_FILTER = True
 
 SOURCE_MIXTURE_YAML = (
-    "src/olmo_core/data/source_mixtures/OLMo3-32B-midtraining-modelnamefilter-weka.yaml"
+    "src/olmo_core/data/source_mixtures/OLMo3-32B-midtraining-modelnamefilter.yaml"
 )
 
 MIDTRAINING_CONFIGS = {
