@@ -102,6 +102,12 @@ MIDTRAINING_CONFIGS = {
         global_batch_size=2_621_440,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-275M-Cx100/step161186/",
     ),
+    "450m": dict(
+        # Starting LR: ~10% of peak pretraining LR (0.008).
+        lr=8e-4,
+        global_batch_size=3_932_160,
+        load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-450m-cx100-lr8e-3/step179814/",
+    ),
     "810m": dict(
         # Starting LR: ~10% of peak pretraining LR (0.002).
         lr=4e-4,
