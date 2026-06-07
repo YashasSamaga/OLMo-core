@@ -108,6 +108,15 @@ LONG_CONTEXT_CONFIGS = {
         fused_linear_loss=False,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-midtraining-275M-v2-lr1.6e-3/step38147",
     ),
+    "450m": dict(
+        lr=8e-4,
+        num_nodes=1,
+        global_batch_size=2 * 1024 * 1024,
+        rank_microbatch_size=LC_SEQUENCE_LENGTH,
+        cp_degree=1,
+        fused_linear_loss=False,
+        load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-midtraining-450m/step38147",
+    ),
     "810m": dict(
         lr=2e-4,
         num_nodes=1,
