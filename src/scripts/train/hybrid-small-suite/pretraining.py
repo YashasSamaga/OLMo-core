@@ -243,13 +243,15 @@ if __name__ == "__main__":
     #   "transformer" in run name  -> pure NoPE transformer (all attention)
     #   "gdn"         in run name  -> pure GDN (all recurrent)
     #   otherwise                  -> default hybrid
+    # NOTE: every run name in this suite contains "hybrid" (the suite name), so we
+    # must NOT guard the GDN branch with a "hybrid not in name" check.
     run_name_lower = sys.argv[2].lower()
     if "transformer" in run_name_lower:
         model_config_builder = partial(
             build_model_config_transformer, model_size=model_size, attn_backend=attn_backend
         )
         arch_tag = "transformer-baseline"
-    elif "gdn" in run_name_lower and "hybrid" not in run_name_lower:
+    elif "gdn" in run_name_lower:
         model_config_builder = partial(build_model_config_gdn, model_size=model_size)
         arch_tag = "gdn-baseline"
     else:
