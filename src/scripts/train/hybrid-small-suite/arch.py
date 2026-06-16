@@ -179,6 +179,161 @@ def build_model_config(
     )
 
 
+def build_model_config_transformer(
+    common: CommonComponents,
+    model_size: str,
+    attn_backend: AttentionBackendName = AttentionBackendName.flash_3,
+) -> TransformerConfig:
+    """
+    Pure transformer (full-attention) baseline at the given model size.
+
+    Every layer is a global softmax-attention layer with NoPE — identical to
+    the global-attention layers in the hybrid, but applied to all layers.
+    All other hyperparameters (d_model, n_layers, n_heads, FFN, norms) match
+    ``build_model_config`` exactly for a direct ablation comparison.
+    """
+    cfg = MODEL_CONFIGS[model_size]
+
+    d_model = cfg["d_model"]
+    hidden_size = cfg["hidden_size"]
+    n_layers = cfg["n_layers"]
+    n_heads = cfg["n_heads"]
+
+    n_kv_heads = 8
+    head_dim = 128
+    layer_norm_eps = 1e-6
+    dtype = DType.float32
+
+    layer_norm = LayerNormConfig(
+        name=LayerNormType.rms,
+        eps=layer_norm_eps,
+        bias=False,
+        dtype=dtype,
+    )
+
+    feed_forward = FeedForwardConfig(
+        hidden_size=hidden_size,
+        bias=False,
+        dtype=dtype,
+        activation=ActivationFunction.silu,
+    )
+
+    # All layers: global softmax attention, NoPE (rope=None), matching the
+    # hybrid's global-attention block exactly.
+    attn_block = TransformerBlockConfig(
+        name=TransformerBlockType.peri_norm,
+        sequence_mixer=AttentionConfig(
+            name=AttentionType.default,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            head_dim=head_dim,
+            bias=False,
+            rope=None,
+            gate=GateConfig(
+                granularity=GateGranularity.elementwise,
+                full_precision=True,
+            ),
+            qk_norm=layer_norm,
+            use_head_qk_norm=True,
+            backend=attn_backend,
+            dtype=dtype,
+        ),
+        feed_forward=feed_forward,
+        layer_norm=layer_norm,
+    )
+
+    return TransformerConfig(
+        d_model=d_model,
+        vocab_size=common.tokenizer.padded_vocab_size(),
+        n_layers=n_layers,
+        block=attn_block,
+        lm_head=LMHeadConfig(
+            loss_implementation=LMLossImplementation.default,
+            layer_norm=layer_norm,
+            bias=False,
+            dtype=dtype,
+        ),
+        dtype=dtype,
+        embed_scale=math.sqrt(d_model),
+        embedding_norm=LayerNormConfig(
+            name=LayerNormType.rms,
+            eps=1e-6,
+            bias=False,
+        ),
+    )
+
+
+def build_model_config_gdn(
+    common: CommonComponents,
+    model_size: str,
+) -> TransformerConfig:
+    """
+    Pure GDN baseline at the given model size.
+
+    Every layer is a Gated DeltaNet layer — the same GDN config used in the
+    hybrid, but applied to all layers with no attention overrides.
+    All other hyperparameters match ``build_model_config`` exactly.
+    """
+    cfg = MODEL_CONFIGS[model_size]
+
+    d_model = cfg["d_model"]
+    hidden_size = cfg["hidden_size"]
+    n_layers = cfg["n_layers"]
+    n_heads = cfg["n_heads"]
+
+    head_dim = 128
+    expand_v = 2.0
+    layer_norm_eps = 1e-6
+    dtype = DType.float32
+
+    layer_norm = LayerNormConfig(
+        name=LayerNormType.rms,
+        eps=layer_norm_eps,
+        bias=False,
+        dtype=dtype,
+    )
+
+    feed_forward = FeedForwardConfig(
+        hidden_size=hidden_size,
+        bias=False,
+        dtype=dtype,
+        activation=ActivationFunction.silu,
+    )
+
+    gdn_block = TransformerBlockConfig(
+        name=TransformerBlockType.peri_norm,
+        sequence_mixer=GatedDeltaNetConfig(
+            n_heads=n_heads,
+            n_v_heads=n_heads,
+            head_dim=head_dim,
+            expand_v=expand_v,
+            dtype=dtype,
+        ),
+        feed_forward=feed_forward,
+        layer_norm=layer_norm,
+    )
+
+    return TransformerConfig(
+        d_model=d_model,
+        vocab_size=common.tokenizer.padded_vocab_size(),
+        n_layers=n_layers,
+        block=gdn_block,
+        lm_head=LMHeadConfig(
+            loss_implementation=LMLossImplementation.default,
+            layer_norm=layer_norm,
+            bias=False,
+            dtype=dtype,
+        ),
+        dtype=dtype,
+        embed_scale=math.sqrt(d_model),
+        embedding_norm=LayerNormConfig(
+            name=LayerNormType.rms,
+            eps=1e-6,
+            bias=False,
+        ),
+    )
+
+
 def parse_model_size(run_name: str) -> str:
     """
     Extract model size key from a run name string.

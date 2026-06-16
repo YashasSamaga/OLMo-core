@@ -52,7 +52,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime
 from functools import partial
 
-from arch import MODEL_CONFIGS, SEQUENCE_LENGTH, build_model_config, parse_model_size
+from arch import (
+    MODEL_CONFIGS,
+    SEQUENCE_LENGTH,
+    build_model_config,
+    build_model_config_gdn,
+    build_model_config_transformer,
+    parse_model_size,
+)
 
 from olmo_core.config import DType
 from olmo_core.data import (
@@ -232,13 +239,34 @@ if __name__ == "__main__":
             break
     sys.argv = [a for a in sys.argv if not a.startswith("--attn_backend=")]
 
+    # Select the model builder from the run name:
+    #   "transformer" in run name  -> pure NoPE transformer (all attention)
+    #   "gdn"         in run name  -> pure GDN (all recurrent)
+    #   otherwise                  -> default hybrid
+    run_name_lower = sys.argv[2].lower()
+    if "transformer" in run_name_lower:
+        model_config_builder = partial(
+            build_model_config_transformer, model_size=model_size, attn_backend=attn_backend
+        )
+        arch_tag = "transformer-baseline"
+    elif "gdn" in run_name_lower and "hybrid" not in run_name_lower:
+        model_config_builder = partial(build_model_config_gdn, model_size=model_size)
+        arch_tag = "gdn-baseline"
+    else:
+        model_config_builder = partial(
+            build_model_config, model_size=model_size, attn_backend=attn_backend
+        )
+        arch_tag = "hybrid"
+
+    print(f"Architecture: {arch_tag}  |  size: {model_size}")
+
     config_builder = partial(
         build_config,
         global_batch_size=cfg["global_batch_size"],
         max_sequence_length=SEQUENCE_LENGTH,
         num_nodes=cfg["num_nodes"],
         data_config_builder=build_data_components,
-        model_config_builder=partial(build_model_config, model_size=model_size, attn_backend=attn_backend),
+        model_config_builder=model_config_builder,
         train_module_config_builder=partial(build_train_module_config, model_size=model_size),
         trainer_config_builder=partial(build_trainer_config, model_size=model_size),
         include_default_evals=False,
