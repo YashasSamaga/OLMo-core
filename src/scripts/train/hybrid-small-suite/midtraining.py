@@ -49,7 +49,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime
 from functools import partial
 
-from arch import MODEL_CONFIGS, SEQUENCE_LENGTH, build_model_config, parse_model_size
+from arch import (
+    MODEL_CONFIGS,
+    SEQUENCE_LENGTH,
+    build_model_config,
+    build_model_config_gdn,
+    build_model_config_transformer,
+    parse_model_size,
+)
 
 from olmo_core.config import DType
 from olmo_core.data import (
@@ -120,6 +127,17 @@ MIDTRAINING_CONFIGS = {
         global_batch_size=8 * 1024 * 1024,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-1.4B-Cx100/step308433/",
     ),
+}
+
+# Pretrained checkpoints for the pure baselines, selected by run-name keyword
+# ("transformer" / "gdn"). These override the hybrid ``load_path`` above.
+BASELINE_LOAD_PATHS = {
+    "transformer": {
+        "275m": "/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-transformer-275M/step161186/",
+    },
+    "gdn": {
+        "275m": "/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-gdn-275M/step161186/",
+    },
 }
 
 
@@ -198,9 +216,13 @@ def build_data_components(
     return DataComponents(dataset=dataset_config, data_loader=data_loader_config)
 
 
-def build_trainer_config(common: CommonComponents, model_size: str) -> TrainerConfig:
+def build_trainer_config(
+    common: CommonComponents, model_size: str, load_path: str | None = None
+) -> TrainerConfig:
     cancel_check_interval = 1000
     mt_cfg = MIDTRAINING_CONFIGS[model_size]
+    if load_path is None:
+        load_path = mt_cfg["load_path"]
 
     assert common.launch is not None
     assert len(common.launch.clusters) == 1
@@ -213,7 +235,7 @@ def build_trainer_config(common: CommonComponents, model_size: str) -> TrainerCo
             load_strategy=LoadStrategy.always,
             load_trainer_state=False,
             load_optim_state=False,
-            load_path=mt_cfg["load_path"],
+            load_path=load_path,
             save_folder=common.save_folder,
             work_dir=common.work_dir,
             save_overwrite=True,
@@ -269,15 +291,46 @@ if __name__ == "__main__":
             attn_backend = backend
             break
 
+    # Select the model builder + pretrained checkpoint from the run name:
+    #   "transformer" in run name  -> pure NoPE transformer baseline
+    #   "gdn"         in run name  -> pure GDN baseline
+    #   otherwise                  -> default hybrid
+    # NOTE: every run name in this suite contains "hybrid" (the suite name), so we
+    # must NOT guard the GDN branch with a "hybrid not in name" check.
+    run_name_lower = sys.argv[2].lower()
+    load_path_override = None
+    if "transformer" in run_name_lower:
+        model_config_builder = partial(
+            build_model_config_transformer, model_size=model_size, attn_backend=attn_backend
+        )
+        load_path_override = BASELINE_LOAD_PATHS["transformer"][model_size]
+        arch_tag = "transformer-baseline"
+    elif "gdn" in run_name_lower:
+        model_config_builder = partial(build_model_config_gdn, model_size=model_size)
+        load_path_override = BASELINE_LOAD_PATHS["gdn"][model_size]
+        arch_tag = "gdn-baseline"
+    else:
+        model_config_builder = partial(
+            build_model_config, model_size=model_size, attn_backend=attn_backend
+        )
+        arch_tag = "hybrid"
+
+    print(
+        f"Architecture: {arch_tag}  |  size: {model_size}  |  "
+        f"load_path: {load_path_override or mt_cfg['load_path']}"
+    )
+
     config_builder = partial(
         build_config,
         global_batch_size=mt_cfg["global_batch_size"],
         max_sequence_length=SEQUENCE_LENGTH,
         num_nodes=cfg["num_nodes"],
         data_config_builder=partial(build_data_components, model_size=model_size),
-        model_config_builder=partial(build_model_config, model_size=model_size, attn_backend=attn_backend),
+        model_config_builder=model_config_builder,
         train_module_config_builder=partial(build_train_module_config, model_size=model_size),
-        trainer_config_builder=partial(build_trainer_config, model_size=model_size),
+        trainer_config_builder=partial(
+            build_trainer_config, model_size=model_size, load_path=load_path_override
+        ),
         include_default_evals=False,
         include_instance_filter=INSTANCE_FILTER,
         beaker_workspace="ai2/linear-rnns",
