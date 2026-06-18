@@ -1,5 +1,7 @@
 # build artifacts
 src/scripts/train/hybrid-small-suite/results
+src/scripts/train/hybrid-small-suite/paper
+src/scripts/train/hybrid-small-suite/paper_v2
 
 .eggs/
 .mypy_cache
