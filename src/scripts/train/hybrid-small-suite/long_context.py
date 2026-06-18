@@ -371,7 +371,7 @@ if __name__ == "__main__":
         ),
         include_default_evals=False,
         include_instance_filter=True,
-        beaker_workspace="ai2/linear-rnns",
+        beaker_workspace="ai2/OLMo-3-moe-experiments",
         num_execution_units=1,
     )
     main(config_builder=config_builder)
