@@ -74,6 +74,17 @@ MODEL_CONFIGS: Dict[str, dict] = {
         global_batch_size=8_388_608,
         rank_microbatch_size=2 * SEQUENCE_LENGTH,
     ),
+    "2.7b": dict(
+        # 2,688,369,664 total / 2,534,369,280 non-embedding params / 2.38B backbone
+        d_model=1536,
+        hidden_size=1536 * 8,
+        n_layers=30,
+        n_heads=16,
+        head_dim=128,
+        num_nodes=16,
+        global_batch_size=8_388_608,
+        rank_microbatch_size=4 * SEQUENCE_LENGTH,
+    )
 }
 
 

@@ -106,6 +106,7 @@ LR = {
     "450m": 0.008,
     "810m": 0.002,
     "1.4b": 0.002,
+    "2.7b": 0.001,
 }
 
 
@@ -229,7 +230,7 @@ if __name__ == "__main__":
         "saturn": AttentionBackendName.flash_2,   # A100s — no flash_3 support
         "titan": AttentionBackendName.flash_4,    # B200, Blackwell
         "jupiter": AttentionBackendName.flash_3,
-        "pluto": AttentionBackendName.flash_3,
+        "holmes": AttentionBackendName.flash_4,
     }
     cluster_arg = " ".join(sys.argv[2:4]).lower()
     attn_backend = AttentionBackendName.flash_3  # default
