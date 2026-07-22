@@ -104,28 +104,34 @@ SOURCE_MIXTURE_YAML = (
 
 MIDTRAINING_CONFIGS = {
     "275m": dict(
-        # Starting LR: ~10% of peak pretraining LR (0.008).
+        # Starting LR: ~20% of peak pretraining LR (0.008).
         lr=1.6e-3,
         global_batch_size=2_621_440,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-275M-Cx100/step161186/",
     ),
     "450m": dict(
-        # Starting LR: ~10% of peak pretraining LR (0.008).
+        # Starting LR: ~20% of peak pretraining LR (0.008).
         lr=1.6e-3,
         global_batch_size=2_621_440,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-450m-cx100-lr8e-3/step179814/",
     ),
     "810m": dict(
-        # Starting LR: ~10% of peak pretraining LR (0.002).
+        # Starting LR: ~20% of peak pretraining LR (0.002).
         lr=4e-4,
         global_batch_size=4 * 1024 * 1024,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-810M-Cx100/step269926/",
     ),
     "1.4b": dict(
-        # Starting LR: ~10% of peak pretraining LR (0.002).
+        # Starting LR: ~20% of peak pretraining LR (0.002).
         lr=4e-4,
         global_batch_size=8 * 1024 * 1024,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-1.4B-Cx100/step308433/",
+    ),
+    "2.7b": dict(
+        # Starting LR: ~20% of peak pretraining LR (0.001).
+        lr=2e-4,
+        global_batch_size=8 * 1024 * 1024,
+        load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-2.7B-Cx100-v2/step604266/",
     ),
 }
 

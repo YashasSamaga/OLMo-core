@@ -74,6 +74,7 @@ from olmo_core.internal.experiment import (
 from olmo_core.nn.attention import AttentionBackendName
 from olmo_core.nn.lm_head import LMLossImplementation
 from olmo_core.nn.transformer import (
+    TransformerActivationCheckpointingMode,
     TransformerConfig,
 )
 from olmo_core.optim import (
@@ -90,6 +91,7 @@ from olmo_core.train.callbacks import (
 )
 from memory_snapshot_callback import MemorySnapshotCallback
 from olmo_core.train.train_module import (
+    TransformerActivationCheckpointingConfig,
     TransformerContextParallelConfig,
     TransformerDataParallelConfig,
     TransformerDataParallelWrappingStrategy,
@@ -132,12 +134,24 @@ LONG_CONTEXT_CONFIGS = {
     ),
     "1.4b": dict(
         lr=2e-4,
-        num_nodes=16,
+        num_nodes=4,
         global_batch_size=4 * 1024 * 1024,
         rank_microbatch_size=LC_SEQUENCE_LENGTH,
         cp_degree=2,
         fused_linear_loss=True,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-midtraining-1.4B-lr2e4/step11921",
+    ),
+    "2.7b": dict(
+        lr=1e-4,
+        num_nodes=4,
+        global_batch_size=4 * 1024 * 1024,
+        rank_microbatch_size=LC_SEQUENCE_LENGTH,
+        # Best-throughput config for 2.7B at 65k seq len: no context parallel,
+        # activation-checkpointing budget 0.9 to fit memory.
+        cp_degree=1,
+        ac_budget=0.9,
+        # fused_linear_loss=True,
+        load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-midtraining-2.7B/step11921",
     ),
 }
 
@@ -182,6 +196,18 @@ def build_train_module_config(
     cp_degree = lc_cfg["cp_degree"]
     cp_config = TransformerContextParallelConfig.ulysses(degree=cp_degree) if cp_degree > 1 else None
 
+    # Optional activation checkpointing (per-size ``ac_budget``). Omitting it keeps
+    # all activations (no recomputation), which is the default for smaller sizes.
+    ac_budget = lc_cfg.get("ac_budget")
+    ac_config = (
+        TransformerActivationCheckpointingConfig(
+            mode=TransformerActivationCheckpointingMode.budget,
+            activation_memory_budget=ac_budget,
+        )
+        if ac_budget is not None
+        else None
+    )
+
     return TransformerTrainModuleConfig(
         rank_microbatch_size=rank_microbatch_size,
         max_sequence_length=LC_SEQUENCE_LENGTH,
@@ -203,6 +229,7 @@ def build_train_module_config(
             wrapping_strategy=TransformerDataParallelWrappingStrategy.full,
         ),
         cp_config=cp_config,
+        ac_config=ac_config,
         float8_config=Float8Config(enabled=False),
         z_loss_multiplier=1e-5,
         max_grad_norm=1.0,
