@@ -352,6 +352,7 @@ if __name__ == "__main__":
         "saturn": AttentionBackendName.flash_2,   # A100s — no flash_3 support
         "jupiter": AttentionBackendName.flash_3,
         "titan": AttentionBackendName.flash_4,    # B200, Blackwell
+        "holmes": AttentionBackendName.flash_4,   # B200, Blackwell
     }
     cluster_arg = " ".join(sys.argv[2:4]).lower()
     attn_backend = AttentionBackendName.flash_3  # default
