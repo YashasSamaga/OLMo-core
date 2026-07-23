@@ -150,7 +150,7 @@ LONG_CONTEXT_CONFIGS = {
         # activation-checkpointing budget 0.9 to fit memory.
         cp_degree=1,
         ac_budget=0.9,
-        fused_linear_loss=False,
+        fused_linear_loss=True,
         load_path="/weka/oe-training-default/ai2-llm/checkpoints/yashasbls/hybrid-small-midtraining-2.7B/step11921",
     ),
 }
