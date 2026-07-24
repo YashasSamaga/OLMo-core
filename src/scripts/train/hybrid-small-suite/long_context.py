@@ -307,8 +307,8 @@ def build_trainer_config(
         .with_callback(
             "checkpointer",
             CheckpointerCallback(
-                save_interval=5000,
-                ephemeral_save_interval=1000,
+                save_interval=1000,
+                ephemeral_save_interval=500,
                 save_async=True,
             ),
         )
