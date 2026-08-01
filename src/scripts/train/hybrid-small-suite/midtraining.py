@@ -283,6 +283,7 @@ if __name__ == "__main__":
         "saturn": AttentionBackendName.flash_2,
         "jupiter": AttentionBackendName.flash_3,
         "titan": AttentionBackendName.flash_4,
+        "holmes": AttentionBackendName.flash_4,
     }
     cluster_arg = " ".join(sys.argv[2:4]).lower()
     attn_backend = AttentionBackendName.flash_3
