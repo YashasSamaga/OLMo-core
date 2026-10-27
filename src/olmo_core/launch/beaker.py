@@ -300,6 +300,17 @@ class BeakerLaunchConfig(Config):
     preemptible: bool = True
     """
     If the job should be preemptible.
+
+    .. deprecated::
+        Beaker deprecated ``preemptible`` in favor of :data:`min_runtime` (and auto-resume).
+        When :data:`min_runtime` is set it takes precedence and ``preemptible`` is ignored.
+    """
+
+    min_runtime: str | None = None
+    """
+    Minimum guaranteed runtime before the job can be preempted, e.g. ``"3h"`` or ``"30m"``.
+    When set, this takes precedence over :data:`preemptible` (the two are mutually exclusive
+    in Beaker). A value of ``"0"`` means the job can be preempted at any time.
     """
 
     retries: int | None = None
@@ -630,7 +641,10 @@ class BeakerLaunchConfig(Config):
             workspace=self.workspace,
             budget=self.budget,
             priority=self.priority,
-            preemptible=self.preemptible,
+            # Beaker deprecated 'preemptible' in favor of 'min_runtime'; the two are mutually
+            # exclusive, so only pass 'preemptible' when 'min_runtime' isn't set.
+            preemptible=self.preemptible if self.min_runtime is None else None,
+            min_runtime=self.min_runtime,
             # Inputs.
             beaker_image=self._resolve_beaker_image(),
             env_vars=self._get_env_vars(),
